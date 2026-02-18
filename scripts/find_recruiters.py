@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from getmehired.services.email_finder import find_emails
 from getmehired.services.recruiter_finder import RecruiterSearchError, find_recruiters
 from getmehired.services.storage import append_recruiters, load
 
@@ -93,7 +94,8 @@ async def main(job_path: Path, max_results: int) -> None:
             if r.linkedin_url:
                 print(f"       LinkedIn: {r.linkedin_url}")
 
-    # ── Save to job file ─────────────────────────────────────
+    # ── Save recruiters (without emails yet) ─────────────────
+    # Persist now so the file is never lost even if email discovery fails.
     _section("STEP 3 — Update Job File")
     t0 = time.perf_counter()
     append_recruiters(job_path, recruiters)
@@ -102,6 +104,34 @@ async def main(job_path: Path, max_results: int) -> None:
     _ok("Status", f"Saved in {elapsed:.3f}s")
     _ok("File", str(job_path))
     _ok("Recruiters saved", str(len(recruiters)))
+
+    # ── Discover emails ───────────────────────────────────────
+    # Tries: domain via web search → Hunter.io; pattern via web search →
+    # Hunter.io → combinatorics fallback (all 6 patterns comma-separated).
+    _section("STEP 4 — Email Discovery")
+    t0 = time.perf_counter()
+    recruiters_with_emails = await find_emails(job.company, recruiters)
+    elapsed = time.perf_counter() - t0
+
+    emails_found = sum(1 for r in recruiters_with_emails if r.email)
+    _ok("Status", f"Complete in {elapsed:.1f}s")
+    _ok("Emails generated", f"{emails_found} / {len(recruiters_with_emails)}")
+
+    if emails_found:
+        for r in recruiters_with_emails:
+            if r.email:
+                emails = r.email.split(",")
+                if len(emails) == 1:
+                    print(f"\n  {r.name}")
+                    print(f"       Email:    {r.email}")
+                else:
+                    print(f"\n  {r.name}  [combinatorics — {len(emails)} patterns]")
+                    for e in emails:
+                        print(f"       {e.strip()}")
+        append_recruiters(job_path, recruiters_with_emails)
+        _ok("File updated", str(job_path))
+    else:
+        _warn("Emails", "None generated — check TAVILY_API_KEY or add HUNTER_API_KEY")
 
     print(f"\n{'═' * 64}")
     print(f"  Done.")

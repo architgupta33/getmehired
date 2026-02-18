@@ -132,12 +132,17 @@ async def find_recruiters(
     terms = _JOB_FAMILY_TERMS.get(job.job_family, ["recruiter", "talent acquisition"])
     city = _extract_city(job.location) if job.location else None
 
-    # Build query cascade: for each term, try with city first, then without
-    queries: list[str] = []
+    # Build query cascade: for each term, try with city first, then without.
+    # "talent" is kept as a last-resort fallback appended after the main terms.
+    queries: list[tuple[str, str]] = []  # (query_string, search_term_label)
     for term in terms[:2]:
         if city:
-            queries.append(f'site:linkedin.com/in "{company}" "{term}" "{city}"')
-        queries.append(f'site:linkedin.com/in "{company}" "{term}"')
+            queries.append((f'site:linkedin.com/in "{company}" "{term}" "{city}"', term))
+        queries.append((f'site:linkedin.com/in "{company}" "{term}"', term))
+    # Talent fallback — only used when all primary queries return nothing
+    if city:
+        queries.append((f'site:linkedin.com/in "{company}" "talent" "{city}"', "talent"))
+    queries.append((f'site:linkedin.com/in "{company}" "talent"', "talent"))
 
     # Build the ordered list of available backends
     cfg = _load_config()
@@ -154,9 +159,20 @@ async def find_recruiters(
     all_recruiters: list[Recruiter] = []
     seen_urls: set[str] = set()
 
-    for i, query in enumerate(queries):
+    # Split queries into primary and talent-fallback groups
+    primary_queries = [(q, t) for q, t in queries if t != "talent"]
+    talent_queries  = [(q, t) for q, t in queries if t == "talent"]
+
+    # Run primary queries first; only run talent queries if still empty after all primary
+    active_queries = primary_queries + talent_queries
+
+    for i, (query, term_label) in enumerate(active_queries):
         if len(all_recruiters) >= max_results:
             break
+
+        # Skip talent fallback queries unless we have zero results so far
+        if term_label == "talent" and all_recruiters:
+            continue
 
         if backend_idx >= len(backends):
             print("  ✗ All search backends exhausted — stopping.")
@@ -189,6 +205,8 @@ async def find_recruiters(
             norm_url = _normalize_linkedin_url(r.linkedin_url or "")
             if norm_url and norm_url not in seen_urls:
                 seen_urls.add(norm_url)
+                # Tag the recruiter with both backend and search term for traceability
+                r.source = f"{r.source} [{term_label}]"
                 all_recruiters.append(r)
                 new_count += 1
 
