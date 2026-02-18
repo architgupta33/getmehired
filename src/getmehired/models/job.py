@@ -40,6 +40,10 @@ class JobPosting(BaseModel):
     # Full scraped text — used downstream for email generation
     description: str
 
+    # Drafted outreach email (populated by Step 4 / Step 8)
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+
     # Metadata
     scraped_at: datetime = None
 

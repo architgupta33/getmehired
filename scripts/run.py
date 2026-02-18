@@ -28,11 +28,13 @@ from pathlib import Path
 # Allow running from repo root without installing the package
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from getmehired.agents.email_drafter import draft_email, make_subject
 from getmehired.agents.job_analyzer import analyze
 from getmehired.services.email_finder import find_emails
 from getmehired.services.job_scraper import _detect_platform, _normalize_url, scrape_job_page
 from getmehired.services.recruiter_finder import RecruiterSearchError, find_recruiters
-from getmehired.services.storage import append_recruiters, save
+from getmehired.services.resume_reader import read_resume
+from getmehired.services.storage import append_recruiters, save, save_email_draft
 
 SEP = "─" * 64
 
@@ -91,7 +93,7 @@ def _print_env_debug() -> None:
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
-async def main(raw_url: str, max_results: int, debug: bool) -> None:
+async def main(raw_url: str, max_results: int, debug: bool, resume: Path | None) -> None:
     """
     Run the full pipeline for a single job URL.
 
@@ -321,6 +323,52 @@ async def main(raw_url: str, max_results: int, debug: bool) -> None:
             _debug("Hint", "Web search needs TAVILY_API_KEY to find domain/pattern.")
             _debug("Hint", "Add HUNTER_API_KEY to .env for Hunter.io fallback.")
 
+    # ── STEP 8: Email Drafting ─────────────────────────────────────────────────
+    # If --resume was provided, use the LLM to draft a personalized outreach
+    # email body for each recruiter who has an email address.
+    # One Groq call drafts the body using the first recruiter's name; subsequent
+    # recruiters get the same body with only the first-name greeting swapped.
+    _section("STEP 8 — Email Drafting")
+
+    if not resume:
+        _warn("Skipped", "No --resume provided. Pass --resume <path> to draft emails.")
+    else:
+        try:
+            resume_text = read_resume(resume)
+            _ok("Resume", f"{resume.name} ({len(resume_text):,} chars extracted)")
+        except (FileNotFoundError, ValueError) as e:
+            _fail("Resume", str(e))
+            resume_text = None
+
+        if resume_text:
+            t0 = time.perf_counter()
+            try:
+                draft_body = await draft_email(job, resume_text, "there")
+                elapsed = time.perf_counter() - t0
+                _ok("Draft generated", f"in {elapsed:.1f}s")
+            except Exception as e:
+                elapsed = time.perf_counter() - t0
+                _fail("Draft", f"FAILED in {elapsed:.1f}s — {e}")
+                draft_body = None
+
+            if draft_body:
+                subject = make_subject(job)
+                save_email_draft(job_path, subject, draft_body)
+                _ok("File updated", str(job_path))
+
+                recruiters_with_email = [r for r in recruiters_with_emails if r.email]
+                _ok("Emails drafted", f"{len(recruiters_with_email)} / {len(recruiters_with_emails)}")
+
+                print(f"\n  Subject: {subject}")
+                print(f"  ---")
+                for line in draft_body.splitlines():
+                    print(f"  {line}")
+
+                print()
+                for r in recruiters_with_email:
+                    email_addr = r.email.split(",")[0].strip()
+                    print(f"  → {r.name}  <{email_addr}>")
+
     print(f"\n{'═' * 64}")
     print(f"  Pipeline complete.")
     print(f"{'═' * 64}\n")
@@ -336,7 +384,7 @@ if __name__ == "__main__":
             "Examples:\n"
             '  python scripts/run.py "https://job-boards.greenhouse.io/anthropic/jobs/5096400008"\n'
             '  python scripts/run.py "https://jobs.lever.co/..." --max-results 10\n'
-            '  python scripts/run.py "https://..." --debug\n'
+            '  python scripts/run.py "https://..." --resume resume.pdf\n'
         ),
     )
     # Positional: the job posting URL to process
@@ -348,6 +396,13 @@ if __name__ == "__main__":
         default=5,
         help="Maximum number of unique recruiters to find (default: 5)",
     )
+    # --resume: path to PDF or .txt resume for email drafting
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Path to resume file (.pdf or .txt) — enables Step 8 email drafting",
+    )
     # --debug prints raw text previews, backend config, tracebacks, and extra hints
     parser.add_argument(
         "--debug",
@@ -356,4 +411,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    asyncio.run(main(raw_url=args.url, max_results=args.max_results, debug=args.debug))
+    asyncio.run(main(raw_url=args.url, max_results=args.max_results, debug=args.debug, resume=args.resume))

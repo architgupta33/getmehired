@@ -78,6 +78,22 @@ def append_recruiters(path: Path, recruiters: list) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def save_email_draft(path: Path, subject: str, body: str) -> None:
+    """
+    Write email_subject and email_body into an existing job JSON file.
+
+    Patches only those two keys — all other fields are preserved.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    data["email_subject"] = subject
+    data["email_body"] = body
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
 def _slug(text: str) -> str:
     """Convert text to a safe filename segment."""
     text = text.lower().strip()
