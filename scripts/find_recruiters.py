@@ -4,9 +4,11 @@ Step 2 — Find recruiters for a saved job posting.
 Usage:
     python scripts/find_recruiters.py <path-to-job.json>
     python scripts/find_recruiters.py <path-to-job.json> --max-results 10
+    python scripts/find_recruiters.py <path-to-job.json> --resume resume.pdf
 
 Examples:
     python scripts/find_recruiters.py data/jobs/belvedere_trading__software_engineer_entry_level_2026__20260215_230035.json
+    python scripts/find_recruiters.py data/jobs/the_home_depot__*.json --resume resume.pdf
 """
 from __future__ import annotations
 
@@ -18,9 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from getmehired.agents.email_drafter import draft_email, make_subject
 from getmehired.services.email_finder import find_emails
 from getmehired.services.recruiter_finder import RecruiterSearchError, find_recruiters
-from getmehired.services.storage import append_recruiters, load
+from getmehired.services.resume_reader import read_resume
+from getmehired.services.storage import append_recruiters, load, save_email_draft
 
 SEP = "─" * 64
 
@@ -43,7 +47,7 @@ def _fail(label: str, value: str) -> None:
     print(f"  ✗ {label:<20} {value}")
 
 
-async def main(job_path: Path, max_results: int) -> None:
+async def main(job_path: Path, max_results: int, resume: Path | None) -> None:
     print(f"\n{'═' * 64}")
     print(f"  GetMeHired — Recruiter Finder")
     print(f"{'═' * 64}")
@@ -133,6 +137,48 @@ async def main(job_path: Path, max_results: int) -> None:
     else:
         _warn("Emails", "None generated — check TAVILY_API_KEY or add HUNTER_API_KEY")
 
+    # ── Email Drafting ────────────────────────────────────────
+    _section("STEP 5 — Email Drafting")
+
+    if not resume:
+        _warn("Skipped", "No --resume provided. Pass --resume <path> to draft emails.")
+    else:
+        try:
+            resume_text = read_resume(resume)
+            _ok("Resume", f"{resume.name} ({len(resume_text):,} chars extracted)")
+        except (FileNotFoundError, ValueError) as e:
+            _fail("Resume", str(e))
+            resume_text = None
+
+        if resume_text:
+            t0 = time.perf_counter()
+            try:
+                draft_body = await draft_email(job, resume_text, "there")
+                elapsed = time.perf_counter() - t0
+                _ok("Draft generated", f"in {elapsed:.1f}s")
+            except Exception as e:
+                elapsed = time.perf_counter() - t0
+                _fail("Draft", f"FAILED in {elapsed:.1f}s — {e}")
+                draft_body = None
+
+            if draft_body:
+                subject = make_subject(job)
+                save_email_draft(job_path, subject, draft_body)
+                _ok("File updated", str(job_path))
+
+                recruiters_with_email = [r for r in recruiters_with_emails if r.email]
+                _ok("Emails drafted", f"{len(recruiters_with_email)} / {len(recruiters_with_emails)}")
+
+                print(f"\n  Subject: {subject}")
+                print(f"  ---")
+                for line in draft_body.splitlines():
+                    print(f"  {line}")
+
+                print()
+                for r in recruiters_with_email:
+                    email_addr = r.email.split(",")[0].strip()
+                    print(f"  → {r.name}  <{email_addr}>")
+
     print(f"\n{'═' * 64}")
     print(f"  Done.")
     print(f"{'═' * 64}\n")
@@ -142,6 +188,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Find recruiters for a saved job posting.")
     parser.add_argument("job_path", type=Path, help="Path to the job JSON file")
     parser.add_argument("--max-results", type=int, default=5, help="Max recruiters to find (default: 5)")
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Path to resume file (.pdf or .txt) — enables Step 5 email drafting",
+    )
     args = parser.parse_args()
 
-    asyncio.run(main(job_path=args.job_path, max_results=args.max_results))
+    asyncio.run(main(job_path=args.job_path, max_results=args.max_results, resume=args.resume))

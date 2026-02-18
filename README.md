@@ -5,7 +5,7 @@ AI-powered job scraping, analysis, and recruiter-finding pipeline.
 ## What it does
 
 ```
-Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Discover Emails → Append to JSON
+Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Discover Emails → Draft Outreach Email → Append to JSON
 ```
 
 1. **Scrape** — fetches the raw job posting text from the URL, platform-aware
@@ -13,6 +13,7 @@ Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters 
 3. **Store** — saves a JSON file to `data/jobs/` for downstream use
 4. **Find Recruiters** — searches LinkedIn for recruiters at the company relevant to the job family, appends results to the job JSON
 5. **Discover Emails** — finds the company's email domain and naming pattern, generates email address(es) for each recruiter
+6. **Draft Email** — reads your resume + job description, uses Groq to write a personalized cold-outreach email body for each recruiter (one LLM call, names substituted per recruiter)
 
 ### Extracted fields
 
@@ -91,10 +92,13 @@ APOLLO_API_KEY=                       # Apollo.io (free tier: org domain lookup)
 source .venv/bin/activate
 python scripts/run.py "<job-url>"
 python scripts/run.py "<job-url>" --max-results 10
-python scripts/run.py "<job-url>" --debug        # verbose output for troubleshooting
+python scripts/run.py "<job-url>" --resume resume.pdf   # also drafts outreach emails
+python scripts/run.py "<job-url>" --debug               # verbose output for troubleshooting
 ```
 
-Runs all 7 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters → email discovery.
+Runs all 8 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters → email discovery → email drafting.
+
+`--resume` is optional. Without it, Steps 1–7 run and Step 8 is skipped.
 
 **Examples:**
 
@@ -185,12 +189,28 @@ python scripts/run.py "https://careers.homedepot.com/job/22798636/lead-data-scie
   Julius Harris, SHRM
        Email:    julius.harris@homedepot.com
   ✓ File updated         data/jobs/the_home_depot__...json
+
+────────────────────────────────────────────────────────────────
+  STEP 8 — Email Drafting
+────────────────────────────────────────────────────────────────
+  ✓ Resume               resume.pdf (3,241 chars extracted)
+  ✓ Draft generated      in 1.3s
+  ✓ Emails drafted       5 / 5
+
+  Julius Harris
+       To:      julius.harris@homedepot.com
+       Subject: Lead Data Scientist at The Home Depot — Julius Harris
+       ---
+       Hi Julius,
+
+       I came across the Lead Data Scientist role at The Home Depot and was
+       immediately drawn to the focus on AI-driven space planning...
 ════════════════════════════════════════════════════════════════
   Pipeline complete.
 ════════════════════════════════════════════════════════════════
 ```
 
-Recruiters (with emails) are appended to the job's JSON file under a `recruiters` key. When the pattern cannot be determined, all 6 common patterns are generated as a comma-separated list so you can try each one.
+Recruiters (with emails and drafted outreach) are saved to the job JSON under a `recruiters` key. Each recruiter entry gains `email_subject` and `email_body` fields once `--resume` is provided.
 
 ---
 
@@ -215,18 +235,19 @@ python scripts/test_scraper.py "https://jobs.lever.co/belvederetrading/f81a8965-
 python scripts/test_scraper.py "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/Software-Engineer-Intern--2026_JR2008747"
 ```
 
-#### Step 2 — Find recruiters + emails for a saved job
+#### Step 2 — Find recruiters + emails (+ optionally draft emails) for a saved job
 
 ```bash
 python scripts/find_recruiters.py data/jobs/<filename>.json
 python scripts/find_recruiters.py data/jobs/<filename>.json --max-results 10
+python scripts/find_recruiters.py data/jobs/<filename>.json --resume resume.pdf
 ```
 
 ```bash
-python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json --max-results 5
+python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json --max-results 5 --resume resume.pdf
 ```
 
-Runs recruiter search (Step 2) and email discovery (Step 3) on an already-saved job file. Useful for re-running just these steps without re-scraping.
+Runs recruiter search, email discovery, and (if `--resume` provided) email drafting on an already-saved job file. Useful for re-running steps without re-scraping.
 
 ---
 
@@ -261,10 +282,14 @@ getmehired/
 │       ├── models/
 │       │   ├── job.py              # JobPosting and JobFamily Pydantic models
 │       │   └── recruiter.py        # Recruiter Pydantic model
+│       ├── agents/
+│       │   ├── job_analyzer.py     # Groq LLM extraction agent
+│       │   └── email_drafter.py    # Groq LLM outreach email drafting agent
 │       └── services/
 │           ├── job_scraper.py      # Platform-aware scraping engine
 │           ├── recruiter_finder.py # 4-tier recruiter search (DDG/Brave/Tavily/Google CSE)
 │           ├── email_finder.py     # Email domain + pattern discovery, address generation
+│           ├── resume_reader.py    # PDF and .txt resume text extraction
 │           └── storage.py          # JSON persistence to data/jobs/
 └── data/
     └── jobs/                       # Saved job postings (git-ignored)
