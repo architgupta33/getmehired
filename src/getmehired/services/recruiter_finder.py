@@ -272,7 +272,7 @@ def _parse_ddg_results(html: str) -> list[Recruiter]:
             continue
 
         title_text = anchor.get_text(separator=" ").strip()
-        name, role_title = _parse_linkedin_title(title_text)
+        name, role_title = _parse_linkedin_title(title_text, linkedin_url)
         if not name:
             continue
 
@@ -325,7 +325,7 @@ def _parse_brave_results(data: dict) -> list[Recruiter]:
         url = result.get("url", "")
         if "linkedin.com/in/" not in url:
             continue
-        name, role_title = _parse_linkedin_title(result.get("title", ""))
+        name, role_title = _parse_linkedin_title(result.get("title", ""), url)
         if not name:
             continue
         recruiters.append(Recruiter(
@@ -377,7 +377,7 @@ def _parse_tavily_results(data: dict) -> list[Recruiter]:
         url = result.get("url", "")
         if "linkedin.com/in/" not in url:
             continue
-        name, role_title = _parse_linkedin_title(result.get("title", ""))
+        name, role_title = _parse_linkedin_title(result.get("title", ""), url)
         if not name:
             continue
         recruiters.append(Recruiter(
@@ -426,7 +426,7 @@ def _parse_google_cse_results(data: dict) -> list[Recruiter]:
         url = item.get("link", "")
         if "linkedin.com/in/" not in url:
             continue
-        name, role_title = _parse_linkedin_title(item.get("title", ""))
+        name, role_title = _parse_linkedin_title(item.get("title", ""), url)
         if not name:
             continue
         recruiters.append(Recruiter(
@@ -478,7 +478,63 @@ def _extract_ddg_url(href: str) -> Optional[str]:
     return None
 
 
-def _parse_linkedin_title(text: str) -> tuple[str, Optional[str]]:
+def _name_from_url_slug(linkedin_url: str, first_name_hint: str = "") -> str:
+    """
+    Derive a full name from a LinkedIn profile URL slug as a fallback.
+
+    LinkedIn slugs come in two forms:
+      - Hyphenated:    "millie-djurdjevic", "austin-breeden-601b361b6"
+      - Concatenated:  "janahaegi", "juliaschmaltz" (no separator)
+
+    For hyphenated slugs we strip the trailing disambiguation suffix (e.g.
+    "-601b361b6"), split on hyphens, and title-case each part.
+
+    For concatenated slugs we use `first_name_hint` (the first name extracted
+    from the search snippet, e.g. "Jana") to split the slug at the right
+    boundary: if the slug starts with the lowercased hint, the remainder is the
+    last name. Otherwise we return the whole slug title-cased as a single token
+    (still better than "Jana H.").
+
+    Examples:
+      "millie-djurdjevic"           → "Millie Djurdjevic"
+      "austin-breeden-601b361b6"    → "Austin Breeden"
+      "janahaegi"  + hint "Jana"    → "Jana Haegi"
+      "juliaschmaltz" + hint "Julia" → "Julia Schmaltz"
+      "mikewhitford"  (no hint)     → "Mikewhitford"  (single token, best effort)
+
+    Returns an empty string if the URL can't be parsed.
+    """
+    try:
+        # Extract the /in/<slug> segment from the URL path
+        path = urlparse(linkedin_url).path  # e.g. "/in/janahaegi/"
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2 or parts[0] != "in":
+            return ""
+        slug = parts[1]  # e.g. "janahaegi" or "millie-djurdjevic"
+
+        # Strip trailing alphanumeric disambiguation suffix (e.g. "-601b361b6")
+        # These look like "-<hex-or-alphanum-6+chars>" and are never part of the name.
+        slug = re.sub(r"-[a-f0-9]{6,}$", "", slug, flags=re.IGNORECASE)
+
+        if "-" in slug:
+            # Hyphenated slug: straightforward word split
+            tokens = [t.title() for t in slug.split("-") if t and not t.isdigit()]
+            return " ".join(tokens) if tokens else ""
+        else:
+            # Concatenated slug: try to split using the first name as a prefix
+            hint = first_name_hint.lower().strip()
+            if hint and slug.lower().startswith(hint):
+                last = slug[len(hint):]  # everything after the first name
+                if last:
+                    return f"{hint.title()} {last.title()}"
+                return hint.title()
+            # No hint or hint doesn't match — return the whole slug title-cased
+            return slug.title()
+    except Exception:
+        return ""
+
+
+def _parse_linkedin_title(text: str, linkedin_url: str = "") -> tuple[str, Optional[str]]:
     """
     Parse a LinkedIn profile title from a search snippet heading.
 
@@ -487,7 +543,16 @@ def _parse_linkedin_title(text: str) -> tuple[str, Optional[str]]:
       "John Smith – Talent Acquisition | LinkedIn"
       "Alice Brown • Senior Recruiter at Company"
 
-    Returns (name, title_or_none). Returns ("", None) if parsing fails.
+    If the parsed name looks incomplete (contains a single-letter initial like
+    "H.", or any word is just one character), we fall back to deriving the full
+    name from the LinkedIn URL slug instead. The URL slug is almost always the
+    person's full name (concatenated or hyphen-separated), so it's a reliable
+    source when the search snippet headline is ambiguous or truncated.
+
+    We pass the extracted first name as a hint to `_name_from_url_slug` so it
+    can correctly split concatenated slugs like "janahaegi" → "Jana Haegi".
+
+    Returns (name, title_or_none). Returns ("", None) if parsing fails entirely.
     """
     text = re.sub(r"\s*[|–\-]\s*LinkedIn\s*$", "", text, flags=re.IGNORECASE).strip()
     match = re.match(r"^(.+?)\s*[-–|•]\s*(.+)$", text)
@@ -495,6 +560,16 @@ def _parse_linkedin_title(text: str) -> tuple[str, Optional[str]]:
         name = match.group(1).strip()
         role = match.group(2).strip()
         if 2 <= len(name) <= 60 and not re.search(r"\d", name):
+            # Check for incomplete names: any word that's a single letter (initial)
+            # e.g. "Jana H." has a word "H." which is just one letter + period.
+            words = name.split()
+            has_initial = any(re.match(r"^[A-Za-z]\.$", w) or len(w) == 1 for w in words)
+            if has_initial and linkedin_url:
+                # Use the first word of the parsed name as a hint for slug splitting
+                first_name_hint = words[0] if words else ""
+                slug_name = _name_from_url_slug(linkedin_url, first_name_hint)
+                if slug_name:
+                    return slug_name, role or None
             return name, role or None
     return "", None
 
