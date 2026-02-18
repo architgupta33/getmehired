@@ -1,16 +1,17 @@
 # GetMeHired
 
-AI-powered job scraping and analysis pipeline. Paste a job posting URL, get back structured data.
+AI-powered job scraping, analysis, and recruiter-finding pipeline.
 
 ## What it does
 
 ```
-Job URL → Scrape → Extract (Groq LLM) → Store as JSON
+Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Append to JSON
 ```
 
 1. **Scrape** — fetches the raw job posting text from the URL, platform-aware
 2. **Analyze** — uses Groq (`llama-3.3-70b-versatile`) to extract structured fields
 3. **Store** — saves a JSON file to `data/jobs/` for downstream use
+4. **Find Recruiters** — searches LinkedIn for recruiters at the company relevant to the job family, appends results to the job JSON
 
 ### Extracted fields
 
@@ -67,13 +68,19 @@ cp .env.example .env
 GROQ_API_KEY=gsk_...
 GROQ_MODEL=llama-3.3-70b-versatile   # optional, this is the default
 DATA_DIR=data/jobs                    # optional, this is the default
+
+# Recruiter finder — optional, tried in order as fallback
+BRAVE_API_KEY=                        # Brave Search API (free tier: ~$0.01/mo cap)
+TAVILY_API_KEY=                       # Tavily (free tier: 1,000 searches/month) ← recommended
+GOOGLE_CSE_API_KEY=                   # Google Custom Search (100 queries/day)
+GOOGLE_CSE_CX=                        # Google Custom Search Engine ID
 ```
 
 ---
 
 ## Usage
 
-### CLI pipeline script
+### Step 1 — Scrape a job posting
 
 ```bash
 source .venv/bin/activate
@@ -92,6 +99,51 @@ python scripts/test_scraper.py "https://jobs.lever.co/belvederetrading/f81a8965-
 # Workday
 python scripts/test_scraper.py "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/Software-Engineer-Intern--2026_JR2008747"
 ```
+
+### Step 2 — Find recruiters for a saved job
+
+```bash
+python scripts/find_recruiters.py data/jobs/<filename>.json
+python scripts/find_recruiters.py data/jobs/<filename>.json --max-results 10
+```
+
+**Example:**
+
+```bash
+python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json --max-results 5
+```
+
+**Sample output:**
+
+```
+════════════════════════════════════════════════════════════════
+  GetMeHired — Recruiter Finder
+════════════════════════════════════════════════════════════════
+
+  STEP 1 — Load Job
+  ✓ Job Title            Geopolitics Analyst, Policy
+  ✓ Company              anthropic
+  ✓ Job Family           Policy / Government Affairs
+  ✓ Location             Washington, D.C.
+
+  STEP 2 — Search for Recruiters
+  Searching for recruiters at 'anthropic' (Policy / Government Affairs)
+  Location hint: Washington, D.C.
+  Max results: 5
+
+  Query 1: site:linkedin.com/in "anthropic" "recruiter" "Washington"
+  → [TAVILY] Found 8 result(s)
+  → 5 new unique recruiter(s)
+
+  [1] Julia Schmaltz
+       Title:    Recruiter @ Anthropic
+       LinkedIn: https://www.linkedin.com/in/juliaschmaltz/
+
+  STEP 3 — Update Job File
+  ✓ Recruiters saved     5
+```
+
+Recruiters are appended to the job's JSON file under a `recruiters` key.
 
 **Sample output:**
 
@@ -153,16 +205,19 @@ getmehired/
 ├── pyproject.toml                  # Build config and dependency declarations
 ├── .env.example                    # Environment variable template
 ├── scripts/
-│   └── test_scraper.py             # CLI pipeline runner: scrape → analyze → store
+│   ├── test_scraper.py             # Step 1 CLI: scrape → analyze → store
+│   └── find_recruiters.py          # Step 2 CLI: find recruiters → append to JSON
 ├── src/
 │   └── getmehired/
 │       ├── config.py               # pydantic-settings: reads .env
 │       ├── agents/
 │       │   └── job_analyzer.py     # Groq LLM extraction agent
 │       ├── models/
-│       │   └── job.py              # JobPosting and JobFamily Pydantic models
+│       │   ├── job.py              # JobPosting and JobFamily Pydantic models
+│       │   └── recruiter.py        # Recruiter Pydantic model
 │       └── services/
 │           ├── job_scraper.py      # Platform-aware scraping engine
+│           ├── recruiter_finder.py # 4-tier recruiter search (DDG/Brave/Tavily/Google CSE)
 │           └── storage.py          # JSON persistence to data/jobs/
 └── data/
     └── jobs/                       # Saved job postings (git-ignored)
@@ -196,3 +251,33 @@ Job description text is truncated to 8,000 characters before being sent to Groq.
 
 ### Groq rate limits
 The free tier has rate limits. Running many extractions in quick succession may return `429 Too Many Requests`. No retry logic is implemented yet.
+
+---
+
+### Recruiter finder limitations
+
+#### Search engine blocking (DuckDuckGo)
+DuckDuckGo HTML mode works under normal usage but triggers bot detection (HTTP 202) if too many queries are fired in a short session. The service auto-falls back to API-based backends (Brave → Tavily → Google CSE) when this happens.
+
+#### Brave Search API free tier
+The Brave free plan has an extremely low spending cap (~$0.01/month ≈ 2 queries). It acts as a thin buffer before Tavily and will exhaust quickly under regular use.
+
+#### LinkedIn title parsing
+Recruiter names and titles are extracted from search snippet headings (`"Name - Title at Company | LinkedIn"`). Profiles with non-standard headlines (e.g. just the company name) will be missing a title. The LinkedIn URL is still captured correctly.
+
+#### LinkedIn URL variants
+Results may include regional LinkedIn domains (e.g. `cn.linkedin.com` for China). These are valid and correct — the profile URL format is consistent regardless of regional subdomain.
+
+#### Company name quality
+Some ATS platforms (e.g. Greenhouse) return the company as a lowercase slug (`"anthropic"` instead of `"Anthropic"`). The recruiter search uses this slug verbatim, which usually works since search engines are case-insensitive, but very unusual slugs may return fewer results.
+
+#### No email extraction
+The recruiter finder returns name, title, and LinkedIn URL only. Email addresses are not extracted (LinkedIn doesn't expose them in search snippets).
+
+#### Search quota limits
+| Backend | Free limit | Notes |
+|---|---|---|
+| DuckDuckGo | IP-based (no hard limit) | Rate-limited under heavy use |
+| Brave | ~$0.01/month | Effectively 1–2 queries/month free |
+| Tavily | 1,000 searches/month | Recommended primary fallback |
+| Google CSE | 100 queries/day | Last resort |

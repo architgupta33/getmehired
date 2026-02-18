@@ -56,6 +56,28 @@ def _make_filename(job: JobPosting) -> str:
     return f"{company}__{title}__{timestamp}.json"
 
 
+def append_recruiters(path: Path, recruiters: list) -> None:
+    """
+    Write a 'recruiters' list into an existing job JSON file.
+
+    Uses a raw JSON merge so the full file dict is preserved — including
+    any keys not present on JobPosting. Existing recruiter data is replaced
+    (idempotent).
+    """
+    from getmehired.models.recruiter import Recruiter
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    data["recruiters"] = [
+        r.model_dump(mode="json") if isinstance(r, Recruiter) else r
+        for r in recruiters
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
 def _slug(text: str) -> str:
     """Convert text to a safe filename segment."""
     text = text.lower().strip()

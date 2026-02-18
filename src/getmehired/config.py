@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,8 +12,15 @@ class Settings(BaseSettings):
     groq_api_key: str
     groq_model: str = "llama-3.3-70b-versatile"
     data_dir: str = "data/jobs"
+    brave_api_key: Optional[str] = None
+    tavily_api_key: Optional[str] = None
+    google_cse_api_key: Optional[str] = None
+    google_cse_cx: Optional[str] = None
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+
