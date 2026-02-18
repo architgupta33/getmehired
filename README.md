@@ -80,14 +80,107 @@ GOOGLE_CSE_CX=                        # Google Custom Search Engine ID
 
 ## Usage
 
-### Step 1 — Scrape a job posting
+### Full pipeline — single command (recommended)
 
 ```bash
 source .venv/bin/activate
-python scripts/test_scraper.py "<job-url>"
+python scripts/run.py "<job-url>"
+python scripts/run.py "<job-url>" --max-results 10
+python scripts/run.py "<job-url>" --debug        # verbose output for troubleshooting
 ```
 
+Runs all 6 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters.
+
 **Examples:**
+
+```bash
+# Greenhouse
+python scripts/run.py "https://job-boards.greenhouse.io/anthropic/jobs/5096400008"
+
+# Lever
+python scripts/run.py "https://jobs.lever.co/belvederetrading/f81a8965-5537-4a4b-aec6-c02dfa51815e" --max-results 10
+
+# Generic (Playwright)
+python scripts/run.py "https://careers.homedepot.com/job/22798636/lead-data-scientist-assortment-and-space-planning-ai-engineering-/"
+```
+
+**Sample output:**
+
+```
+════════════════════════════════════════════════════════════════
+  GetMeHired — Full Pipeline
+════════════════════════════════════════════════════════════════
+  Input URL : https://careers.homedepot.com/job/22798636/...
+
+────────────────────────────────────────────────────────────────
+  STEP 1 — URL Normalisation
+────────────────────────────────────────────────────────────────
+  ✓ URL                  https://careers.homedepot.com/job/22798636/...
+  ✓ Platform detected    generic
+
+────────────────────────────────────────────────────────────────
+  STEP 2 — Scraping
+────────────────────────────────────────────────────────────────
+  ✓ Status               Success in 31.0s
+  ✓ Page title           Lead Data Scientist, Assortment and Space Planning (AI-Engin
+  ✓ Chars extracted      12000
+
+────────────────────────────────────────────────────────────────
+  STEP 3 — Analysis (Groq LLM)
+────────────────────────────────────────────────────────────────
+  ✓ Status               Success in 0.6s
+  ✓ Job Title            Lead Data Scientist, Assortment and Space Planning (AI-Engineering)
+  ✓ Company              The Home Depot
+  ✓ Job Family           Data Science / ML
+  ✓ Location             Atlanta, GA
+
+────────────────────────────────────────────────────────────────
+  STEP 4 — Storage
+────────────────────────────────────────────────────────────────
+  ✓ Status               Saved in 0.002s
+  ✓ File                 data/jobs/the_home_depot__lead_data_scientist_...json
+  ✓ File size            12,600 bytes
+
+────────────────────────────────────────────────────────────────
+  STEP 5 — Recruiter Search
+────────────────────────────────────────────────────────────────
+  Searching for recruiters at 'The Home Depot' (Data Science / ML)
+  Location hint: Atlanta, GA
+  Max results: 5
+
+  Query 1: site:linkedin.com/in "The Home Depot" "technical recruiter" "Atlanta"
+  ⚠ DDG failed: DuckDuckGo bot detection triggered (HTTP 202).
+  ↻ Switching to BRAVE...
+  → [BRAVE] Found 3 result(s)
+  → 3 new unique recruiter(s)
+
+  [1] Milica Henderson
+       Title:    Sr. Technical Recruiter | The Home Depot
+       LinkedIn: https://www.linkedin.com/in/milliedjurdjevic/
+
+────────────────────────────────────────────────────────────────
+  STEP 6 — Save Recruiters
+────────────────────────────────────────────────────────────────
+  ✓ Status               Saved in 0.001s
+  ✓ Recruiters saved     5
+════════════════════════════════════════════════════════════════
+  Pipeline complete.
+════════════════════════════════════════════════════════════════
+```
+
+Recruiters are appended to the job's JSON file under a `recruiters` key.
+
+---
+
+### Running steps individually
+
+Use these when you want to re-run just one step (e.g. retry recruiter search on an already-saved job).
+
+#### Step 1 — Scrape a job posting
+
+```bash
+python scripts/test_scraper.py "<job-url>"
+```
 
 ```bash
 # Greenhouse
@@ -100,87 +193,15 @@ python scripts/test_scraper.py "https://jobs.lever.co/belvederetrading/f81a8965-
 python scripts/test_scraper.py "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/Software-Engineer-Intern--2026_JR2008747"
 ```
 
-### Step 2 — Find recruiters for a saved job
+#### Step 2 — Find recruiters for a saved job
 
 ```bash
 python scripts/find_recruiters.py data/jobs/<filename>.json
 python scripts/find_recruiters.py data/jobs/<filename>.json --max-results 10
 ```
 
-**Example:**
-
 ```bash
 python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json --max-results 5
-```
-
-**Sample output:**
-
-```
-════════════════════════════════════════════════════════════════
-  GetMeHired — Recruiter Finder
-════════════════════════════════════════════════════════════════
-
-  STEP 1 — Load Job
-  ✓ Job Title            Geopolitics Analyst, Policy
-  ✓ Company              anthropic
-  ✓ Job Family           Policy / Government Affairs
-  ✓ Location             Washington, D.C.
-
-  STEP 2 — Search for Recruiters
-  Searching for recruiters at 'anthropic' (Policy / Government Affairs)
-  Location hint: Washington, D.C.
-  Max results: 5
-
-  Query 1: site:linkedin.com/in "anthropic" "recruiter" "Washington"
-  → [TAVILY] Found 8 result(s)
-  → 5 new unique recruiter(s)
-
-  [1] Julia Schmaltz
-       Title:    Recruiter @ Anthropic
-       LinkedIn: https://www.linkedin.com/in/juliaschmaltz/
-
-  STEP 3 — Update Job File
-  ✓ Recruiters saved     5
-```
-
-Recruiters are appended to the job's JSON file under a `recruiters` key.
-
-**Sample output:**
-
-```
-════════════════════════════════════════════════════════════════
-  GetMeHired — Pipeline Debug
-════════════════════════════════════════════════════════════════
-  Input URL : https://job-boards.greenhouse.io/anthropic/jobs/5096400008
-
-────────────────────────────────────────────────────────────────
-  STEP 1 — URL Normalisation
-────────────────────────────────────────────────────────────────
-  ✓ URL                https://job-boards.greenhouse.io/anthropic/jobs/5096400008
-  ✓ Platform detected  greenhouse
-
-────────────────────────────────────────────────────────────────
-  STEP 2 — Scraping
-────────────────────────────────────────────────────────────────
-  ✓ Status             Success in 0.4s
-  ✓ Page title         Geopolitics Analyst, Policy
-  ✓ Chars extracted    7845
-
-────────────────────────────────────────────────────────────────
-  STEP 3 — Analysis (Groq LLM)
-────────────────────────────────────────────────────────────────
-  ✓ Status             Success in 0.5s
-  ✓ Job Title          Geopolitics Analyst, Policy
-  ✓ Company            Anthropic
-  ✓ Job Family         Policy / Government Affairs
-  ✓ Location           Washington, D.C.
-
-────────────────────────────────────────────────────────────────
-  STEP 4 — Storage
-────────────────────────────────────────────────────────────────
-  ✓ Status             Saved in 0.001s
-  ✓ File               data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json
-  ✓ File size          6,241 bytes
 ```
 
 ---
@@ -205,8 +226,9 @@ getmehired/
 ├── pyproject.toml                  # Build config and dependency declarations
 ├── .env.example                    # Environment variable template
 ├── scripts/
-│   ├── test_scraper.py             # Step 1 CLI: scrape → analyze → store
-│   └── find_recruiters.py          # Step 2 CLI: find recruiters → append to JSON
+│   ├── run.py                      # Full pipeline CLI: scrape → analyze → store → find recruiters
+│   ├── test_scraper.py             # Step 1 only CLI: scrape → analyze → store
+│   └── find_recruiters.py          # Step 2 only CLI: find recruiters → append to JSON
 ├── src/
 │   └── getmehired/
 │       ├── config.py               # pydantic-settings: reads .env
@@ -264,6 +286,8 @@ The Brave free plan has an extremely low spending cap (~$0.01/month ≈ 2 querie
 
 #### LinkedIn title parsing
 Recruiter names and titles are extracted from search snippet headings (`"Name - Title at Company | LinkedIn"`). Profiles with non-standard headlines (e.g. just the company name) will be missing a title. The LinkedIn URL is still captured correctly.
+
+When a name is truncated to an initial (e.g. `"Jana H."`), the parser falls back to the LinkedIn profile URL slug to reconstruct the full name (e.g. `/in/janahaegi/` → `"Jana Haegi"`). This covers the most common case but may produce a single concatenated token for unusual slugs without hyphens.
 
 #### LinkedIn URL variants
 Results may include regional LinkedIn domains (e.g. `cn.linkedin.com` for China). These are valid and correct — the profile URL format is consistent regardless of regional subdomain.
