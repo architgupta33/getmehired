@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     tavily_api_key: Optional[str] = None
     google_cse_api_key: Optional[str] = None
     google_cse_cx: Optional[str] = None
+    hunter_api_key: Optional[str] = None
+    apollo_api_key: Optional[str] = None
 
 
 @lru_cache(maxsize=1)

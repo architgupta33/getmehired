@@ -5,13 +5,14 @@ AI-powered job scraping, analysis, and recruiter-finding pipeline.
 ## What it does
 
 ```
-Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Append to JSON
+Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Discover Emails → Append to JSON
 ```
 
 1. **Scrape** — fetches the raw job posting text from the URL, platform-aware
 2. **Analyze** — uses Groq (`llama-3.3-70b-versatile`) to extract structured fields
 3. **Store** — saves a JSON file to `data/jobs/` for downstream use
 4. **Find Recruiters** — searches LinkedIn for recruiters at the company relevant to the job family, appends results to the job JSON
+5. **Discover Emails** — finds the company's email domain and naming pattern, generates email address(es) for each recruiter
 
 ### Extracted fields
 
@@ -74,6 +75,10 @@ BRAVE_API_KEY=                        # Brave Search API (free tier: ~$0.01/mo c
 TAVILY_API_KEY=                       # Tavily (free tier: 1,000 searches/month) ← recommended
 GOOGLE_CSE_API_KEY=                   # Google Custom Search (100 queries/day)
 GOOGLE_CSE_CX=                        # Google Custom Search Engine ID
+
+# Email discovery — optional, tried in order as fallback
+HUNTER_API_KEY=                       # Hunter.io (free tier: 25 searches/month)
+APOLLO_API_KEY=                       # Apollo.io (free tier: org domain lookup)
 ```
 
 ---
@@ -89,7 +94,7 @@ python scripts/run.py "<job-url>" --max-results 10
 python scripts/run.py "<job-url>" --debug        # verbose output for troubleshooting
 ```
 
-Runs all 6 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters.
+Runs all 7 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters → email discovery.
 
 **Examples:**
 
@@ -163,12 +168,29 @@ python scripts/run.py "https://careers.homedepot.com/job/22798636/lead-data-scie
 ────────────────────────────────────────────────────────────────
   ✓ Status               Saved in 0.001s
   ✓ Recruiters saved     5
+
+────────────────────────────────────────────────────────────────
+  STEP 7 — Email Discovery
+────────────────────────────────────────────────────────────────
+  Discovering email domain for 'The Home Depot'...
+  ✓ Domain               homedepot.com
+  Discovering email pattern for '@homedepot.com'...
+  ✓ Pattern              {first}.{last}  →  e.g. jane.doe@homedepot.com
+  ✓ Status               Complete in 2.1s
+  ✓ Emails generated     5 / 5
+
+  Milica Henderson
+       Email:    milica.henderson@homedepot.com
+
+  Julius Harris, SHRM
+       Email:    julius.harris@homedepot.com
+  ✓ File updated         data/jobs/the_home_depot__...json
 ════════════════════════════════════════════════════════════════
   Pipeline complete.
 ════════════════════════════════════════════════════════════════
 ```
 
-Recruiters are appended to the job's JSON file under a `recruiters` key.
+Recruiters (with emails) are appended to the job's JSON file under a `recruiters` key. When the pattern cannot be determined, all 6 common patterns are generated as a comma-separated list so you can try each one.
 
 ---
 
@@ -193,7 +215,7 @@ python scripts/test_scraper.py "https://jobs.lever.co/belvederetrading/f81a8965-
 python scripts/test_scraper.py "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/Software-Engineer-Intern--2026_JR2008747"
 ```
 
-#### Step 2 — Find recruiters for a saved job
+#### Step 2 — Find recruiters + emails for a saved job
 
 ```bash
 python scripts/find_recruiters.py data/jobs/<filename>.json
@@ -203,6 +225,8 @@ python scripts/find_recruiters.py data/jobs/<filename>.json --max-results 10
 ```bash
 python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_policy__20260215_225512.json --max-results 5
 ```
+
+Runs recruiter search (Step 2) and email discovery (Step 3) on an already-saved job file. Useful for re-running just these steps without re-scraping.
 
 ---
 
@@ -240,6 +264,7 @@ getmehired/
 │       └── services/
 │           ├── job_scraper.py      # Platform-aware scraping engine
 │           ├── recruiter_finder.py # 4-tier recruiter search (DDG/Brave/Tavily/Google CSE)
+│           ├── email_finder.py     # Email domain + pattern discovery, address generation
 │           └── storage.py          # JSON persistence to data/jobs/
 └── data/
     └── jobs/                       # Saved job postings (git-ignored)
@@ -295,9 +320,6 @@ Results may include regional LinkedIn domains (e.g. `cn.linkedin.com` for China)
 #### Company name quality
 Some ATS platforms (e.g. Greenhouse) return the company as a lowercase slug (`"anthropic"` instead of `"Anthropic"`). The recruiter search uses this slug verbatim, which usually works since search engines are case-insensitive, but very unusual slugs may return fewer results.
 
-#### No email extraction
-The recruiter finder returns name, title, and LinkedIn URL only. Email addresses are not extracted (LinkedIn doesn't expose them in search snippets).
-
 #### Search quota limits
 | Backend | Free limit | Notes |
 |---|---|---|
@@ -305,3 +327,47 @@ The recruiter finder returns name, title, and LinkedIn URL only. Email addresses
 | Brave | ~$0.01/month | Effectively 1–2 queries/month free |
 | Tavily | 1,000 searches/month | Recommended primary fallback |
 | Google CSE | 100 queries/day | Last resort |
+
+---
+
+### Email discovery
+
+#### How it works
+Email discovery runs after recruiter search and attempts three tiers to identify the company's email domain and naming pattern:
+
+**Domain discovery** (tried in order, stops on first success):
+1. Tavily web search — queries for the company's official site, frequency-votes across 8 results to pick the true corporate domain (avoids one-off PR sub-sites)
+2. Hunter.io `/domain-search` — authoritative lookup by company name
+3. Apollo.io organization search — free-tier org lookup returns `primary_domain` directly
+
+**Pattern discovery** (tried in order):
+1. Tavily web search — regex-mines search snippets for real `@domain` email addresses, infers pattern from their structure
+2. Hunter.io `/domain-search` — returns the pattern key directly when it has data
+3. Combinatorics fallback — generates all 6 common patterns as a comma-separated list
+
+#### The 6 email patterns
+| Pattern | Example (Jane Doe) |
+|---|---|
+| `{first}.{last}` | jane.doe@company.com |
+| `{f}{last}` | jdoe@company.com |
+| `{first}{l}` | janed@company.com |
+| `{first}` | jane@company.com |
+| `{f}.{last}` | j.doe@company.com |
+| `{first}{last}` | janedoe@company.com |
+
+#### Name handling
+- Middle initials are skipped: `Marcus P White` → `marcus.white@…` (not `marcus.p@…`)
+- Credential suffixes are stripped: `Julius Harris, SHRM` → `julius.harris@…`
+- Accented characters are ASCII-normalized: `Héléne` → `helene@…`
+- Truncated names (e.g. `Jana H.`) are recovered from the LinkedIn URL slug: `/in/janahaegi/` → `Jana Haegi`
+
+#### Recruiter search resilience
+- `talent` is added as a last-resort search term if all primary recruiter queries return zero results
+- The search term used to find each recruiter is recorded in the `source` field (e.g. `brave [technical recruiter]`)
+
+#### Email discovery quota limits
+| Backend | Free limit | Notes |
+|---|---|---|
+| Tavily | 1,000 searches/month | Used for both domain and pattern search |
+| Hunter.io | 25 searches/month | Domain + pattern in one call |
+| Apollo.io | Unlimited (org search) | Domain only; pattern not available on free tier |

@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from getmehired.agents.job_analyzer import analyze
+from getmehired.services.email_finder import find_emails
 from getmehired.services.job_scraper import _detect_platform, _normalize_url, scrape_job_page
 from getmehired.services.recruiter_finder import RecruiterSearchError, find_recruiters
 from getmehired.services.storage import append_recruiters, save
@@ -266,9 +267,9 @@ async def main(raw_url: str, max_results: int, debug: bool) -> None:
             if debug and r.source:
                 print(f"       Source:   {r.source}")
 
-    # ── STEP 6: Save Recruiters ────────────────────────────────────────────────
-    # Merges the recruiter list into the existing job JSON file under the key
-    # "recruiters". This is idempotent — re-running overwrites the previous list.
+    # ── STEP 6: Save Recruiters (without emails yet) ───────────────────────────
+    # Persist the recruiter list now so the job file is never lost even if the
+    # email discovery step (Step 7) fails or has no API keys configured.
     _section("STEP 6 — Save Recruiters")
     t0 = time.perf_counter()
     append_recruiters(job_path, recruiters)
@@ -281,6 +282,44 @@ async def main(raw_url: str, max_results: int, debug: bool) -> None:
     if debug:
         _debug("Key in JSON", '"recruiters"')
         _debug("Idempotent", "Yes — re-running overwrites previous recruiter list")
+
+    # ── STEP 7: Email Discovery ────────────────────────────────────────────────
+    # Discover the company's email domain and naming pattern, then generate
+    # email address(es) for each recruiter. Results are written back to the
+    # same job JSON file, updating the "email" field on each recruiter entry.
+    #
+    # Discovery order:
+    #   Domain:  web search (Tavily) → Hunter.io
+    #   Pattern: web search (Tavily) → Hunter.io → combinatorics (all 6 patterns)
+    _section("STEP 7 — Email Discovery")
+    t0 = time.perf_counter()
+    recruiters_with_emails = await find_emails(job.company, recruiters)
+    elapsed = time.perf_counter() - t0
+
+    emails_found = sum(1 for r in recruiters_with_emails if r.email)
+    _ok("Status", f"Complete in {elapsed:.1f}s")
+    _ok("Emails generated", f"{emails_found} / {len(recruiters_with_emails)}")
+
+    if emails_found:
+        for r in recruiters_with_emails:
+            if r.email:
+                # Show comma-separated list (combinatorics) on separate indented lines
+                emails = r.email.split(",")
+                if len(emails) == 1:
+                    print(f"\n  {r.name}")
+                    print(f"       Email:    {r.email}")
+                else:
+                    print(f"\n  {r.name}  [combinatorics — {len(emails)} patterns]")
+                    for e in emails:
+                        print(f"       {e.strip()}")
+        # Write emails back to the JSON file
+        append_recruiters(job_path, recruiters_with_emails)
+        _ok("File updated", str(job_path))
+    else:
+        _warn("Emails", "None generated — check TAVILY_API_KEY or add HUNTER_API_KEY")
+        if debug:
+            _debug("Hint", "Web search needs TAVILY_API_KEY to find domain/pattern.")
+            _debug("Hint", "Add HUNTER_API_KEY to .env for Hunter.io fallback.")
 
     print(f"\n{'═' * 64}")
     print(f"  Pipeline complete.")
