@@ -78,6 +78,37 @@ def append_recruiters(path: Path, recruiters: list) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def load_recruiters(path: Path) -> list:
+    """Load the recruiter list from a job JSON file as Recruiter objects."""
+    from getmehired.models.recruiter import Recruiter
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    return [Recruiter(**r) for r in data.get("recruiters", [])]
+
+
+def save_send_state(path: Path, recruiters: list) -> None:
+    """
+    Persist updated send-state fields for each recruiter back to the job JSON.
+
+    Only the recruiter list is overwritten; email_subject, email_body, and
+    all other job-level fields are preserved.
+    """
+    from getmehired.models.recruiter import Recruiter
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    data["recruiters"] = [
+        r.model_dump(mode="json") if isinstance(r, Recruiter) else r
+        for r in recruiters
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
 def save_email_draft(path: Path, subject: str, body: str) -> None:
     """
     Write email_subject and email_body into an existing job JSON file.

@@ -13,6 +13,8 @@ dependencies = [
     "lxml>=4.9.0",
     "httpx>=0.25.0",
     "pdfplumber>=0.10",
+    "google-auth-oauthlib>=1.2.0",
+    "google-api-python-client>=2.120.0",
 ]
 
 [project.optional-dependencies]
