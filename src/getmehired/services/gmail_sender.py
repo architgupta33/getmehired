@@ -22,6 +22,8 @@ import base64
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -119,34 +121,52 @@ def _next_address(r: Recruiter) -> Optional[str]:
 
 # ── Name substitution ─────────────────────────────────────────────────────────
 
-def _personalize_body(body: str, recruiter_name: str) -> str:
+def _personalize_body(body: str, recruiter_name: str, sender_name: str = "") -> str:
     """
-    Replace "Hi there," with "Hi {FirstName}," in the email body.
+    Personalize the email body for a specific recruiter.
 
-    Uses _parse_name() to extract the first name. Falls back to "there"
-    for single-word names or names that can't be parsed.
+    - Replaces "Hi there," with "Hi {FirstName},"
+    - Appends sender name after "Best," if provided
     """
     first, _ = _parse_name(recruiter_name)
     first_display = first.title() if first else "there"
-    return body.replace("Hi there,", f"Hi {first_display},", 1)
+    body = body.replace("Hi there,", f"Hi {first_display},", 1)
+    if sender_name:
+        body = body.replace("Best,", f"Best,\n{sender_name}", 1)
+    return body
 
 
 # ── MIME message builder ───────────────────────────────────────────────────────
 
-def _build_raw_message(to: str, subject: str, body: str, from_name: str) -> str:
+def _build_raw_message(
+    to: str,
+    subject: str,
+    body: str,
+    from_name: str,
+    resume_path: Optional[Path] = None,
+) -> str:
     """
     Build a base64url-encoded RFC 2822 message for the Gmail API send endpoint.
+
+    If resume_path is provided the PDF is attached as application/pdf.
     """
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["To"] = to
-    if from_name:
-        msg["From"] = f"{from_name} <me>"
-    else:
-        msg["From"] = "me"
+    msg["From"] = f"{from_name} <me>" if from_name else "me"
     msg.attach(MIMEText(body, "plain", "utf-8"))
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    return raw
+
+    if resume_path and resume_path.exists():
+        with open(resume_path, "rb") as f:
+            part = MIMEBase("application", "pdf")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition", "attachment", filename=resume_path.name
+        )
+        msg.attach(part)
+
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
 
 # ── Send batch ────────────────────────────────────────────────────────────────
@@ -157,6 +177,7 @@ async def send_batch(
     max_send: int,
     dry_run: bool,
     from_name: str,
+    resume_path: Optional[Path] = None,
 ) -> list[Recruiter]:
     """
     Send outreach emails to up to `max_send` eligible recruiters.
@@ -182,8 +203,8 @@ async def send_batch(
         if not addr:
             continue
 
-        body = _personalize_body(job.email_body, recruiter.name)
-        raw = _build_raw_message(addr, job.email_subject, body, from_name)
+        body = _personalize_body(job.email_body, recruiter.name, sender_name=from_name)
+        raw = _build_raw_message(addr, job.email_subject, body, from_name, resume_path)
 
         attempt_label = ""
         if recruiter.email_tried:
@@ -196,6 +217,8 @@ async def send_batch(
             first, _ = _parse_name(recruiter.name)
             greeting = f"Hi {first.title()}," if first else "Hi there,"
             print(f"      {greeting} ...")
+            if resume_path:
+                print(f"      [attachment: {resume_path.name}]")
             continue
 
         # Send via Gmail API (sync call, run in executor)

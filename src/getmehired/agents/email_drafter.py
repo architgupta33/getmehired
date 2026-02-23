@@ -22,6 +22,9 @@ You are a professional job applicant writing a cold outreach email to a recruite
 Write a concise, genuine, and personalized email body (3–4 short paragraphs, under 200 words).
 Do NOT include a subject line.
 Start directly with "Hi {first_name}," on the very first line.
+In the very first sentence, naturally include the job URL as a plain URL (no markdown, no angle brackets) \
+right after you name the role — for example: "I came across the Data Scientist role at Stripe \
+(https://stripe.com/jobs/...) and wanted to reach out."
 End the email with "Would love to connect." followed by a blank line and then "Best,".
 Do not include a name after "Best," — the sender will add their own signature.
 Return only the email body text — no extra commentary, no markdown.
@@ -31,6 +34,7 @@ _USER_TEMPLATE = """\
 Recruiter first name: {first_name}
 Company: {company}
 Job title: {job_title}
+Job URL: {job_url}
 
 --- JOB DESCRIPTION ---
 {job_description}
@@ -69,6 +73,7 @@ async def draft_email(
         first_name=first_name,
         company=job.company,
         job_title=job.job_title,
+        job_url=job.url,
         job_description=job.description[:3_000],
         resume_text=resume_text[:4_000],
     )
@@ -90,7 +95,7 @@ def make_subject(job: JobPosting) -> str:
     """
     Generate an outreach email subject line.
 
-    Format: "Interested in {job_title}"
+    Format: "Exploring the {job_title} role at {company}"
 
     Args:
         job: The JobPosting.
@@ -98,4 +103,4 @@ def make_subject(job: JobPosting) -> str:
     Returns:
         Subject line string.
     """
-    return f"Interested in {job.job_title}"
+    return f"Exploring the {job.job_title} role at {job.company}"
