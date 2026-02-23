@@ -1,11 +1,11 @@
 # GetMeHired
 
-AI-powered job scraping, analysis, and recruiter-finding pipeline.
+AI-powered job application pipeline — from a job URL to personalized outreach emails sent via Gmail.
 
 ## What it does
 
 ```
-Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters → Discover Emails → Draft Outreach Email → Append to JSON
+Job URL → Scrape → Extract (Groq LLM) → Store → Find Recruiters → Discover Emails → Draft Email → Send via Gmail → Bounce Detection
 ```
 
 1. **Scrape** — fetches the raw job posting text from the URL, platform-aware
@@ -13,7 +13,9 @@ Job URL → Scrape → Extract (Groq LLM) → Store as JSON → Find Recruiters 
 3. **Store** — saves a JSON file to `data/jobs/` for downstream use
 4. **Find Recruiters** — searches LinkedIn for recruiters at the company relevant to the job family, appends results to the job JSON
 5. **Discover Emails** — finds the company's email domain and naming pattern, generates email address(es) for each recruiter
-6. **Draft Email** — reads your resume + job description, uses Groq to write a personalized cold-outreach email body for each recruiter (one LLM call, names substituted per recruiter)
+6. **Draft Email** — reads your resume + job description, uses Groq to write a personalized cold-outreach email body (one LLM call; names substituted per recruiter at send time)
+7. **Send via Gmail** — authenticates via OAuth2, shows a recruiter list + email preview for confirmation, then sends personalized emails with your resume attached
+8. **Bounce Detection** — polls Gmail for MAILER-DAEMON bounce messages; retries the next email pattern for any bounced address on the next run
 
 ### Extracted fields
 
@@ -54,7 +56,7 @@ python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 # Install dependencies
-pip install playwright beautifulsoup4 lxml httpx groq pydantic pydantic-settings python-dotenv
+pip install -e .
 
 # Install Playwright browser (only needed once, for Workday/generic scraping)
 playwright install chromium
@@ -80,7 +82,24 @@ GOOGLE_CSE_CX=                        # Google Custom Search Engine ID
 # Email discovery — optional, tried in order as fallback
 HUNTER_API_KEY=                       # Hunter.io (free tier: 25 searches/month)
 APOLLO_API_KEY=                       # Apollo.io (free tier: org domain lookup)
+
+# Gmail sender (Step 7 — send_emails.py)
+GMAIL_SENDER_NAME=Archit Gupta        # Display name in From: header
+GMAIL_MAX_SEND_PER_RUN=3              # Max emails per run (default: 3)
+GMAIL_BOUNCE_WAIT_SECONDS=300         # Seconds to wait before bounce poll (default: 300)
+GMAIL_BOUNCE_LOOKBACK_MINUTES=30      # Lookback window for bounce detection (default: 30)
 ```
+
+### Gmail OAuth setup (one-time)
+
+Step 7 sends emails through your Gmail account using the Gmail API. You need to set up OAuth credentials once:
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → create a project → enable the **Gmail API**
+2. Go to **APIs & Services → Credentials** → **Create Credentials → OAuth 2.0 Client ID** → Desktop app
+3. Download `client_secret.json` → save as `~/.getmehired/gmail_credentials.json`
+4. Run `send_emails.py` — a browser window opens for OAuth consent → token cached at `~/.getmehired/gmail_token.json`
+
+Subsequent runs auto-refresh the token silently. Required scope: `gmail.modify` (send + inbox read for bounce detection).
 
 ---
 
@@ -96,9 +115,9 @@ python scripts/run.py "<job-url>" --resume resume.pdf   # also drafts outreach e
 python scripts/run.py "<job-url>" --debug               # verbose output for troubleshooting
 ```
 
-Runs all 8 steps end-to-end: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters → email discovery → email drafting.
+Runs Steps 1–8: URL normalisation → scraping → LLM analysis → storage → recruiter search → save recruiters → email discovery → email drafting.
 
-`--resume` is optional. Without it, Steps 1–7 run and Step 8 is skipped.
+`--resume` is optional. Without it, Steps 1–7 run and Step 8 (email drafting) is skipped. Sending emails is a separate step — run `send_emails.py` after this.
 
 **Examples:**
 
@@ -193,24 +212,16 @@ python scripts/run.py "https://careers.homedepot.com/job/22798636/lead-data-scie
 ────────────────────────────────────────────────────────────────
   STEP 8 — Email Drafting
 ────────────────────────────────────────────────────────────────
-  ✓ Resume               resume.pdf (3,241 chars extracted)
+  ✓ Resume               resume.pdf (3,921 chars extracted)
   ✓ Draft generated      in 1.3s
-  ✓ Emails drafted       5 / 5
-
-  Julius Harris
-       To:      julius.harris@homedepot.com
-       Subject: Lead Data Scientist at The Home Depot — Julius Harris
-       ---
-       Hi Julius,
-
-       I came across the Lead Data Scientist role at The Home Depot and was
-       immediately drawn to the focus on AI-driven space planning...
+  ✓ Subject              Exploring the Lead Data Scientist role at The Home Depot
+  ✓ Body                 857 chars
 ════════════════════════════════════════════════════════════════
   Pipeline complete.
 ════════════════════════════════════════════════════════════════
 ```
 
-Recruiters (with emails and drafted outreach) are saved to the job JSON under a `recruiters` key. Each recruiter entry gains `email_subject` and `email_body` fields once `--resume` is provided.
+The job JSON gains `email_subject` and `email_body` (job-level, not per-recruiter). The body uses `"Hi there,"` as a placeholder — names are substituted per recruiter at send time.
 
 ---
 
@@ -249,6 +260,47 @@ python scripts/find_recruiters.py data/jobs/anthropic__geopolitics_analyst_polic
 
 Runs recruiter search, email discovery, and (if `--resume` provided) email drafting on an already-saved job file. Useful for re-running steps without re-scraping.
 
+#### Step 3 — Send outreach emails
+
+```bash
+python scripts/send_emails.py data/jobs/<filename>.json \
+    --resume resume.pdf \
+    --from-name "Your Name"
+```
+
+```bash
+# Dry run — shows what would be sent without calling Gmail
+python scripts/send_emails.py data/jobs/stripe__*.json \
+    --dry-run --resume resume.pdf --from-name "Your Name"
+
+# Send up to 3 emails (default), wait 5 min, then check for bounces
+python scripts/send_emails.py data/jobs/stripe__*.json \
+    --resume resume.pdf --from-name "Your Name"
+
+# Send, skip bounce polling
+python scripts/send_emails.py data/jobs/stripe__*.json \
+    --resume resume.pdf --from-name "Your Name" --no-wait
+
+# Check bounces only (no sending)
+python scripts/send_emails.py data/jobs/stripe__*.json --check-bounces
+
+# Retry bounced addresses with next email pattern
+python scripts/send_emails.py data/jobs/stripe__*.json \
+    --resume resume.pdf --from-name "Your Name" --retry-bounced
+```
+
+**What happens:**
+
+1. Loads the job JSON and verifies an email draft exists
+2. Re-drafts the email body fresh (includes job URL in opening sentence) if `--resume` is provided
+3. Shows a confirmation preview — recruiter list with LinkedIn URLs + full personalized email — before sending
+4. Authenticates with Gmail (OAuth2, cached token after first run)
+5. Sends to up to `--max-send` eligible recruiters (default: 3), attaches resume PDF
+6. Waits then polls Gmail inbox for MAILER-DAEMON bounce messages
+7. Marks bounced addresses and suggests retrying with next email pattern
+
+Each send is persisted to the JSON immediately, so a crash mid-batch doesn't lose progress.
+
 ---
 
 ## Supported platforms
@@ -271,24 +323,24 @@ getmehired/
 ├── pyproject.toml                  # Build config and dependency declarations
 ├── .env.example                    # Environment variable template
 ├── scripts/
-│   ├── run.py                      # Full pipeline CLI: scrape → analyze → store → find recruiters
+│   ├── run.py                      # Full pipeline CLI: scrape → analyze → store → find recruiters → draft email
 │   ├── test_scraper.py             # Step 1 only CLI: scrape → analyze → store
-│   └── find_recruiters.py          # Step 2 only CLI: find recruiters → append to JSON
+│   ├── find_recruiters.py          # Step 2 only CLI: find recruiters → emails → draft email
+│   └── send_emails.py             # Step 3 only CLI: Gmail send → bounce detection → retry
 ├── src/
 │   └── getmehired/
 │       ├── config.py               # pydantic-settings: reads .env
 │       ├── agents/
-│       │   └── job_analyzer.py     # Groq LLM extraction agent
-│       ├── models/
-│       │   ├── job.py              # JobPosting and JobFamily Pydantic models
-│       │   └── recruiter.py        # Recruiter Pydantic model
-│       ├── agents/
 │       │   ├── job_analyzer.py     # Groq LLM extraction agent
 │       │   └── email_drafter.py    # Groq LLM outreach email drafting agent
+│       ├── models/
+│       │   ├── job.py              # JobPosting and JobFamily Pydantic models
+│       │   └── recruiter.py        # Recruiter Pydantic model (incl. send state)
 │       └── services/
 │           ├── job_scraper.py      # Platform-aware scraping engine
 │           ├── recruiter_finder.py # 4-tier recruiter search (DDG/Brave/Tavily/Google CSE)
 │           ├── email_finder.py     # Email domain + pattern discovery, address generation
+│           ├── gmail_sender.py     # Gmail OAuth2 send + bounce detection
 │           ├── resume_reader.py    # PDF and .txt resume text extraction
 │           └── storage.py          # JSON persistence to data/jobs/
 └── data/
