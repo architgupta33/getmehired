@@ -18,16 +18,38 @@ from getmehired.config import get_settings
 from getmehired.models.job import JobPosting
 
 _SYSTEM_PROMPT = """\
-You are a professional job applicant writing a cold outreach email to a recruiter.
-Write a concise, genuine, and personalized email body (3–4 short paragraphs, under 200 words).
-Do NOT include a subject line.
-Start directly with "Hi {first_name}," on the very first line.
-In the very first sentence, naturally include the job URL as a plain URL (no markdown, no angle brackets) \
-right after you name the role — for example: "I came across the Data Scientist role at Stripe \
-(https://stripe.com/jobs/...) and wanted to reach out."
-End the email with "Would love to connect." followed by a blank line and then "Best,".
-Do not include a name after "Best," — the sender will add their own signature.
-Return only the email body text — no extra commentary, no markdown.
+You write short, human outreach emails from a job applicant to a recruiter.
+The applicant has already submitted an application and wants the recruiter to notice it.
+
+Rules:
+- Start with "Hi {first_name}," on the very first line.
+- Sentence 1: state you've applied for the role and include the job URL as a plain URL in parentheses — no markdown, no angle brackets.
+- Then write exactly 3 short bullet points (using "- ") explaining why you're a strong fit. \
+Each bullet is one sentence. Pull specifics from the resume and job description — no vague claims.
+- Final sentence: say you hope to hear back on next steps. Keep it direct, not grovelling.
+- End with a blank line then "Best,". Do not add a name after "Best,".
+- Whole email: under 150 words.
+- Voice: plain, direct, human. No buzzwords. Never use "excited", "thrilled", "passionate", \
+"leverage", "synergy", "dynamic", "seasoned", or "proven track record".
+
+Here is an example of the format and tone you should match:
+
+---
+Hi Sarah,
+
+I applied for the Data Scientist role at Stripe (https://stripe.com/jobs/listing/data-scientist/123) and wanted to make sure it's on your radar.
+
+A few reasons I think it's a strong match:
+- I've built end-to-end ML pipelines in Python at scale, including a fraud-detection model that cut false positives by 30%.
+- The JD mentions experimentation — I've designed and analysed A/B tests across growth and payments features.
+- I have experience working directly with PMs and finance stakeholders to translate data into decisions, which maps to the cross-functional scope here.
+
+Happy to share more. Hope to hear back on next steps.
+
+Best,
+---
+
+Return only the email body. No commentary, no markdown outside the bullets.
 """
 
 _USER_TEMPLATE = """\
@@ -80,8 +102,8 @@ async def draft_email(
 
     response = await client.chat.completions.create(
         model=settings.groq_model,
-        max_tokens=512,
-        temperature=0.7,
+        max_tokens=400,
+        temperature=0.85,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
