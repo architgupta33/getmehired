@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import sys
-import time
 from datetime import datetime, timedelta, timezone
 from email import encoders
 from email.mime.base import MIMEBase
@@ -331,10 +329,12 @@ async def check_bounces(
         if r.email_sent_at and r.email_sent_at < cutoff:
             continue  # sent before the lookback window, don't touch
 
+        if r.email_bounced is not None:
+            continue  # already has a definitive status — don't overwrite
+
         if r.email_sent_to.lower() in bounce_addresses:
-            if r.email_bounced is not True:
-                r.email_bounced = True
-                changed += 1
+            r.email_bounced = True
+            changed += 1
         elif r.email_bounced is None:
             # Sent within window, no bounce found → tentatively delivered
             r.email_bounced = False
@@ -346,7 +346,90 @@ async def check_bounces(
     return recruiters, len([r for r in recruiters if r.email_bounced is True])
 
 
-# ── Countdown ─────────────────────────────────────────────────────────────────
+# ── Continuous bounce polling ─────────────────────────────────────────────────
+
+async def poll_bounces_loop(
+    job_path: Path,
+    service,
+    poll_interval_seconds: int = 60,
+    lookback_minutes: int = 30,
+) -> tuple[list[Recruiter], int]:
+    """
+    Poll Gmail for bounce messages every `poll_interval_seconds` until all
+    pending recruiter sends have a definitive status (bounced or delivered).
+
+    Prints a live status table after each poll. Exits cleanly on Ctrl+C.
+    Returns (updated_recruiters, total_bounce_count).
+    """
+    poll_num = 0
+
+    print(f"\n  Polling every {poll_interval_seconds}s for bounce reports. Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            recruiters = load_recruiters(job_path)
+            pending = [r for r in recruiters if r.email_sent_to and r.email_bounced is None]
+
+            if not pending:
+                print(f"  All sent emails have a definitive status. Stopping poll.\n")
+                break
+
+            # Countdown to next poll
+            for remaining in range(poll_interval_seconds, 0, -5):
+                sent_count = sum(1 for r in recruiters if r.email_sent_to)
+                bounced_count = sum(1 for r in recruiters if r.email_bounced is True)
+                delivered_count = sum(1 for r in recruiters if r.email_bounced is False)
+                pending_count = len(pending)
+                print(
+                    f"\r  [{remaining:>3}s] sent={sent_count}  "
+                    f"delivered={delivered_count}  bounced={bounced_count}  "
+                    f"pending={pending_count}   ",
+                    end="", flush=True,
+                )
+                await asyncio.sleep(min(5, remaining))
+            print()
+
+            # Run bounce check
+            poll_num += 1
+            print(f"  Poll #{poll_num} — checking Gmail...", flush=True)
+            recruiters, bounce_count = await check_bounces(job_path, service, lookback_minutes)
+
+            # Print status table
+            sent_this_check = [r for r in recruiters if r.email_sent_to]
+            if sent_this_check:
+                print(f"\n  {'Name':<28}  {'Sent to':<35}  Status")
+                print(f"  {'─'*28}  {'─'*35}  {'─'*24}")
+                for r in sent_this_check:
+                    if r.email_bounced is True:
+                        candidates = [e.strip() for e in r.email.split(",") if e.strip()]
+                        untried = [e for e in candidates if e not in r.email_tried]
+                        suffix = f" → retry: {untried[0]}" if untried else " (all exhausted)"
+                        status = f"BOUNCED{suffix}"
+                    elif r.email_bounced is False:
+                        status = "delivered"
+                    else:
+                        status = "pending"
+                    print(f"  {r.name:<28}  {(r.email_sent_to or ''):<35}  {status}")
+                print()
+
+    except KeyboardInterrupt:
+        print(f"\n\n  Poll stopped by user.\n")
+
+    recruiters = load_recruiters(job_path)
+    bounce_count = sum(1 for r in recruiters if r.email_bounced is True)
+
+    bounced_with_retries = [
+        r for r in recruiters
+        if r.email_bounced is True
+        and any(e.strip() not in r.email_tried for e in r.email.split(",") if e.strip())
+    ]
+    if bounced_with_retries:
+        names = ", ".join(r.name for r in bounced_with_retries)
+        print(f"  {len(bounced_with_retries)} recruiter(s) bounced with untried patterns: {names}")
+        print(f"  Re-run with --retry-bounced to send to the next email pattern.\n")
+
+    return recruiters, bounce_count
+
 
 async def wait_with_countdown(seconds: int) -> None:
     """Display a live countdown while waiting for bounce messages to arrive."""

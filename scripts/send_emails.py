@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -37,8 +36,8 @@ from getmehired.services.gmail_sender import (
     _personalize_body,
     check_bounces,
     get_gmail_service,
+    poll_bounces_loop,
     send_batch,
-    wait_with_countdown,
 )
 from getmehired.services.resume_reader import read_resume
 from getmehired.services.storage import load, load_recruiters, save_email_draft
@@ -254,35 +253,15 @@ async def main(
             print(f"\n{'═' * 64}\n  Done.\n{'═' * 64}\n")
             return
 
-    # ── STEP 5: Wait + bounce detection ──────────────────────────────────────
-    _section(f"STEP {'5' if retry_bounced else '4'} — Wait for Bounces")
+    # ── STEP 5: Continuous bounce polling ────────────────────────────────────
+    step_n = "5" if retry_bounced else "4"
+    _section(f"STEP {step_n} — Bounce Detection (polling every {wait_seconds}s)")
 
-    await wait_with_countdown(wait_seconds)
-
-    _section(f"STEP {'6' if retry_bounced else '5'} — Check Bounces")
-
-    t0 = time.perf_counter()
-    recruiters, bounce_count = await check_bounces(
-        job_path, service, settings.gmail_bounce_lookback_minutes
+    recruiters, bounce_count = await poll_bounces_loop(
+        job_path, service,
+        poll_interval_seconds=wait_seconds,
+        lookback_minutes=settings.gmail_bounce_lookback_minutes,
     )
-    elapsed = time.perf_counter() - t0
-
-    _ok("Poll complete", f"in {elapsed:.1f}s")
-    _ok("File updated", str(job_path))
-
-    if bounce_count == 0:
-        _ok("Bounces", "None detected — emails appear delivered")
-    else:
-        _warn("Bounces", f"{bounce_count} bounce(s) detected")
-        for r in recruiters:
-            if r.email_bounced:
-                candidates = [e.strip() for e in r.email.split(",") if e.strip()]
-                untried = [e for e in candidates if e not in r.email_tried]
-                if untried:
-                    _warn(r.name, f"bounced → next pattern: {untried[0]}")
-                else:
-                    _warn(r.name, "bounced → all patterns exhausted")
-        print(f"\n  Re-run with --retry-bounced to send to next email pattern.")
 
     print(f"\n{'═' * 64}\n  Done.\n{'═' * 64}\n")
 
