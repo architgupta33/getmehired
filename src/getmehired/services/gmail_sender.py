@@ -431,10 +431,3 @@ async def poll_bounces_loop(
     return recruiters, bounce_count
 
 
-async def wait_with_countdown(seconds: int) -> None:
-    """Display a live countdown while waiting for bounce messages to arrive."""
-    print(f"\n  Waiting {seconds}s for delivery status reports...", flush=True)
-    for remaining in range(seconds, 0, -5):
-        print(f"\r  {remaining:>4}s remaining...  ", end="", flush=True)
-        await asyncio.sleep(min(5, remaining))
-    print(f"\r  Done waiting.                  ")

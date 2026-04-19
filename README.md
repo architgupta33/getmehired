@@ -273,33 +273,33 @@ python scripts/send_emails.py data/jobs/<filename>.json \
 python scripts/send_emails.py data/jobs/stripe__*.json \
     --dry-run --resume resume.pdf --from-name "Your Name"
 
-# Send up to 3 emails (default), wait 5 min, then check for bounces
+# Send up to 3 per round (default), poll for bounces, retry automatically
 python scripts/send_emails.py data/jobs/stripe__*.json \
     --resume resume.pdf --from-name "Your Name"
 
-# Send, skip bounce polling
+# Send, skip bounce polling and auto-retry
 python scripts/send_emails.py data/jobs/stripe__*.json \
     --resume resume.pdf --from-name "Your Name" --no-wait
 
-# Check bounces only (no sending)
-python scripts/send_emails.py data/jobs/stripe__*.json --check-bounces
-
-# Retry bounced addresses with next email pattern
+# Control batch size and poll interval
 python scripts/send_emails.py data/jobs/stripe__*.json \
-    --resume resume.pdf --from-name "Your Name" --retry-bounced
+    --resume resume.pdf --from-name "Your Name" --max-send 5 --wait-seconds 120
 ```
 
 **What happens:**
 
 1. Loads the job JSON and verifies an email draft exists
-2. Re-drafts the email body fresh (includes job URL in opening sentence) if `--resume` is provided
+2. Re-drafts the email body once (includes job URL in opening sentence) if `--resume` is provided
 3. Shows a confirmation preview — recruiter list with LinkedIn URLs + full personalized email — before sending
 4. Authenticates with Gmail (OAuth2, cached token after first run)
-5. Sends to up to `--max-send` eligible recruiters (default: 3), attaches resume PDF
-6. Waits then polls Gmail inbox for MAILER-DAEMON bounce messages
-7. Marks bounced addresses and suggests retrying with next email pattern
+5. **Automatic send + retry loop:**
+   - Sends to up to `--max-send` eligible recruiters per round (default: 3), with resume attached
+   - Polls Gmail every `--wait-seconds` (default: 60s) for MAILER-DAEMON bounce messages
+   - If any address bounced and the recruiter has untried email patterns, retries automatically
+   - Loop exits when all recruiters are delivered or all patterns are exhausted
+   - Press Ctrl+C at any time to stop after the current poll
 
-Each send is persisted to the JSON immediately, so a crash mid-batch doesn't lose progress.
+`--max-send` controls how many emails to send per round — not the total. All eligible recruiters will eventually be reached across rounds. Each send is persisted to the JSON immediately, so a crash mid-batch doesn't lose progress.
 
 ---
 

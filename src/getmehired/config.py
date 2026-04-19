@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     gmail_token_path: str = "~/.getmehired/gmail_token.json"
     gmail_sender_name: str = ""
     gmail_max_send_per_run: int = 3
-    gmail_bounce_wait_seconds: int = 300
+    gmail_bounce_poll_interval_seconds: int = 60
     gmail_bounce_lookback_minutes: int = 30
 
 

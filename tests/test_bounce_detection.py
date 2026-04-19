@@ -445,3 +445,57 @@ class TestPollBouncesLoop:
 
         bob_r = next(r for r in recruiters if r.name == "Bob")
         assert bob_r.email_bounced is None  # untouched
+
+
+# ── Auto-retry logic (integration of _is_sendable + _next_address) ────────────
+
+class TestAutoRetryLogic:
+    """
+    These tests verify the core logic the auto-retry loop in send_emails.py
+    depends on: after a bounce, _is_sendable returns True and _next_address
+    returns the next untried pattern.
+    """
+
+    def test_sendable_and_next_address_after_bounce(self):
+        # First pattern tried and bounced; second pattern untried
+        r = _make_recruiter(
+            email="alice@a.com,a.alice@a.com",
+            sent_to="alice@a.com", sent_at=RECENT,
+            bounced=True, tried=["alice@a.com"],
+        )
+        assert _is_sendable(r) is True
+        assert _next_address(r) == "a.alice@a.com"
+
+    def test_not_sendable_and_no_address_when_all_exhausted(self):
+        # Both patterns tried and bounced — loop should stop
+        r = _make_recruiter(
+            email="alice@a.com,a.alice@a.com",
+            sent_to="a.alice@a.com", sent_at=RECENT,
+            bounced=True, tried=["alice@a.com", "a.alice@a.com"],
+        )
+        assert _is_sendable(r) is False
+        assert _next_address(r) is None
+
+    def test_loop_stops_when_all_delivered(self):
+        # Both recruiters delivered — no retryable ones
+        alice = _make_recruiter("Alice", "alice@a.com",
+                                sent_to="alice@a.com", sent_at=RECENT,
+                                bounced=False, tried=["alice@a.com"])
+        bob = _make_recruiter("Bob", "bob@b.com",
+                              sent_to="bob@b.com", sent_at=RECENT,
+                              bounced=False, tried=["bob@b.com"])
+        retryable = [r for r in [alice, bob] if _is_sendable(r)]
+        assert retryable == []
+
+    def test_loop_continues_while_any_bounced_with_patterns(self):
+        # Alice bounced with untried pattern, Bob delivered — loop should continue (alice retryable)
+        alice = _make_recruiter("Alice", "alice@a.com,a.alice@a.com",
+                                sent_to="alice@a.com", sent_at=RECENT,
+                                bounced=True, tried=["alice@a.com"])
+        bob = _make_recruiter("Bob", "bob@b.com",
+                              sent_to="bob@b.com", sent_at=RECENT,
+                              bounced=False, tried=["bob@b.com"])
+        retryable = [r for r in [alice, bob] if _is_sendable(r)]
+        assert len(retryable) == 1
+        assert retryable[0].name == "Alice"
+        assert _next_address(retryable[0]) == "a.alice@a.com"

@@ -1,14 +1,22 @@
 """
-Step 5 — Send outreach emails via Gmail and monitor for bounces.
+Step 5 — Send outreach emails via Gmail and automatically retry bounces.
 
 Usage:
     python scripts/send_emails.py <path-to-job.json>
-    python scripts/send_emails.py <path-to-job.json> --max-send 3
+    python scripts/send_emails.py <path-to-job.json> --resume resume.pdf --from-name "Your Name"
     python scripts/send_emails.py <path-to-job.json> --dry-run
     python scripts/send_emails.py <path-to-job.json> --no-wait
-    python scripts/send_emails.py <path-to-job.json> --check-bounces
-    python scripts/send_emails.py <path-to-job.json> --retry-bounced
-    python scripts/send_emails.py <path-to-job.json> --from-name "Archit Gupta"
+    python scripts/send_emails.py <path-to-job.json> --max-send 5
+
+Flow:
+  1. Load job + verify email draft exists
+  2. (Optional) Re-draft email body with job URL embedded if --resume provided (once only)
+  3. Show confirmation: recruiter list with LinkedIn URLs + full email preview → y/N
+  4. Gmail OAuth (browser on first run, silent refresh after)
+  5. Loop until all recruiters are delivered or all patterns exhausted:
+       a. Send to eligible recruiters (new + retry-bounced)
+       b. Poll Gmail every --wait-seconds for MAILER-DAEMON bounces
+       c. If any bounced with untried patterns → retry automatically
 
 First run opens a browser for Gmail OAuth consent.
 Subsequent runs use the cached token at ~/.getmehired/gmail_token.json.
@@ -23,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import time
 import sys
 from pathlib import Path
 
@@ -34,7 +43,6 @@ from getmehired.services.gmail_sender import (
     _is_sendable,
     _next_address,
     _personalize_body,
-    check_bounces,
     get_gmail_service,
     poll_bounces_loop,
     send_batch,
@@ -68,15 +76,15 @@ async def main(
     max_send: int,
     dry_run: bool,
     no_wait: bool,
-    check_bounces_only: bool,
-    retry_bounced: bool,
     from_name: str,
-    wait_seconds: int,
+    poll_interval: int,
     resume_path: Path | None = None,
 ) -> None:
     print(f"\n{'═' * 64}")
     print(f"  GetMeHired — Email Sender")
     print(f"{'═' * 64}")
+
+    settings = get_settings()
 
     # ── STEP 1: Load job ──────────────────────────────────────────────────────
     _section("STEP 1 — Load Job")
@@ -101,7 +109,6 @@ async def main(
     with_email = sum(1 for r in recruiters if r.email)
     already_sent = sum(1 for r in recruiters if r.email_sent_at)
     bounced = sum(1 for r in recruiters if r.email_bounced is True)
-
     eligible = sum(1 for r in recruiters if _is_sendable(r))
 
     _ok("Recruiters", f"{total} total, {with_email} with email")
@@ -109,14 +116,12 @@ async def main(
         _ok("Already sent", f"{already_sent} (bounced: {bounced})")
     _ok("Eligible to send", str(eligible))
 
-    if eligible == 0 and not check_bounces_only:
-        _warn("Nothing to send", "All recruiters already sent or no email addresses found.")
-        if not retry_bounced:
-            sys.exit(0)
+    if eligible == 0:
+        _warn("Nothing to send", "All recruiters already delivered or all patterns exhausted.")
+        sys.exit(0)
 
-    # ── STEP 1b: Re-draft email if --resume provided ───────────────────────────
-    # Regenerates body (with job URL embedded) + updates subject to CTA format.
-    if resume_path and not check_bounces_only:
+    # ── STEP 1b: Re-draft email (once only — not repeated on retry rounds) ────
+    if resume_path:
         _section("STEP 1b — Re-draft Email")
         try:
             resume_text = read_resume(resume_path)
@@ -125,14 +130,13 @@ async def main(
             _fail("Resume", str(e))
             sys.exit(1)
 
-        import time as _time
-        t0 = _time.perf_counter()
+        t0 = time.perf_counter()
         try:
             new_body = await draft_email(job, resume_text, "there")
-            elapsed = _time.perf_counter() - t0
+            elapsed = time.perf_counter() - t0
             new_subject = make_subject(job)
             save_email_draft(job_path, new_subject, new_body)
-            job = load(job_path)  # reload with updated fields
+            job = load(job_path)
             _ok("Draft regenerated", f"in {elapsed:.1f}s")
             _ok("Subject", new_subject)
             _ok("Attachment", resume_path.name)
@@ -141,24 +145,25 @@ async def main(
             sys.exit(1)
 
     # ── STEP 2: Review & confirm before sending ───────────────────────────────
-    if not dry_run and not check_bounces_only:
+    if not dry_run:
         _section("STEP 2 — Review Before Sending")
 
-        # Show recruiter list with LinkedIn URLs
         recruiters_preview = load_recruiters(job_path)
-        sendable = [r for r in recruiters_preview if _is_sendable(r)][:max_send]
+        all_sendable = [r for r in recruiters_preview if _is_sendable(r)]
+        sendable = all_sendable[:max_send]
 
         print(f"\n  Recruiters that will receive this email ({len(sendable)}):\n")
         for i, r in enumerate(sendable, 1):
             addr = _next_address(r)
             print(f"  [{i}] {r.name}")
             print(f"       Email:    {addr}")
-            if r.linkedin_url:
-                print(f"       LinkedIn: {r.linkedin_url}")
-            else:
-                print(f"       LinkedIn: (not found)")
+            print(f"       LinkedIn: {r.linkedin_url or '(not found)'}")
 
-        # Show full email (personalized with first recruiter's name)
+        if len(all_sendable) > max_send:
+            remaining = len(all_sendable) - max_send
+            print(f"\n  Sending to {max_send} of {len(all_sendable)} eligible recruiters this batch.")
+            print(f"  Remaining {remaining} will be sent automatically in subsequent rounds.")
+
         preview_body = _personalize_body(
             job.email_body, sendable[0].name if sendable else "there", sender_name=from_name
         )
@@ -169,9 +174,8 @@ async def main(
             print(f"  {line}")
         if resume_path:
             print(f"\n  [Attachment: {resume_path.name}]")
-        print(f"  {'─' * 60}")
+        print(f"  {'─' * 60}\n")
 
-        print()
         try:
             answer = input("  Send these emails? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -191,10 +195,8 @@ async def main(
     else:
         try:
             service = get_gmail_service()
-            # Get authed address for display
             profile = service.users().getProfile(userId="me").execute()
-            authed_email = profile.get("emailAddress", "unknown")
-            _ok("Authenticated as", authed_email)
+            _ok("Authenticated as", profile.get("emailAddress", "unknown"))
         except FileNotFoundError as e:
             _fail("Credentials", str(e))
             sys.exit(1)
@@ -202,33 +204,17 @@ async def main(
             _fail("Auth failed", str(e))
             sys.exit(1)
 
-    # ── STEP 4: Check bounces (if --retry-bounced or --check-bounces) ─────────
-    settings = get_settings()
-
-    if retry_bounced or check_bounces_only:
-        _section("STEP 4 — Check Bounces (pre-send)")
-        t0 = time.perf_counter()
-        recruiters, bounce_count = await check_bounces(
-            job_path, service, settings.gmail_bounce_lookback_minutes
-        )
-        elapsed = time.perf_counter() - t0
-        _ok("Poll complete", f"in {elapsed:.1f}s")
-        _ok("Bounces found", str(bounce_count))
-        _ok("File updated", str(job_path))
-
-        if check_bounces_only:
-            for r in recruiters:
-                if r.email_sent_to:
-                    status = "bounced" if r.email_bounced else ("pending" if r.email_bounced is None else "delivered")
-                    print(f"\n  {r.name}")
-                    print(f"       Sent to: {r.email_sent_to}")
-                    print(f"       Status:  {status}")
-            print(f"\n{'═' * 64}\n  Done.\n{'═' * 64}\n")
-            return
-
-    # ── STEP 5: Send emails ───────────────────────────────────────────────────
-    if not check_bounces_only:
-        _section(f"STEP {'5' if retry_bounced else '4'} — Send Emails{'  [DRY RUN]' if dry_run else ''}")
+    # ── STEP 4+: Send → poll → auto-retry loop ────────────────────────────────
+    # Re-draft (STEP 1b) already happened once above — not repeated here.
+    # The loop sends to eligible recruiters, polls for bounces, and retries
+    # automatically until all are delivered or all patterns are exhausted.
+    round_num = 0
+    while True:
+        round_num += 1
+        label = f"STEP 4 — Send Emails{'  [DRY RUN]' if dry_run else ''}"
+        if round_num > 1:
+            label = f"STEP 4 — Retry Round {round_num}{'  [DRY RUN]' if dry_run else ''}"
+        _section(label)
 
         t0 = time.perf_counter()
         try:
@@ -244,45 +230,54 @@ async def main(
             _fail("Send failed", str(e))
             sys.exit(1)
 
-        sent_this_run = sum(1 for r in recruiters if r.email_sent_at and r.email_bounced is None)
         _ok("Status", f"Complete in {elapsed:.1f}s")
         if not dry_run:
             _ok("File updated", str(job_path))
 
-        if dry_run or no_wait:
-            print(f"\n{'═' * 64}\n  Done.\n{'═' * 64}\n")
-            return
+        # Check if anything was actually sent this round
+        sent_this_round = [r for r in recruiters if r.email_bounced is None and r.email_sent_at]
+        if not sent_this_round or dry_run or no_wait:
+            break
 
-    # ── STEP 5: Continuous bounce polling ────────────────────────────────────
-    step_n = "5" if retry_bounced else "4"
-    _section(f"STEP {step_n} — Bounce Detection (polling every {wait_seconds}s)")
+        # Poll for bounces until all sent-this-round have a definitive status
+        _section(f"STEP 5 — Bounce Detection (polling every {poll_interval}s)")
+        recruiters, _ = await poll_bounces_loop(
+            job_path, service,
+            poll_interval_seconds=poll_interval,
+            lookback_minutes=settings.gmail_bounce_lookback_minutes,
+        )
 
-    recruiters, bounce_count = await poll_bounces_loop(
-        job_path, service,
-        poll_interval_seconds=wait_seconds,
-        lookback_minutes=settings.gmail_bounce_lookback_minutes,
-    )
+        # Check if any bounced recruiters still have untried patterns
+        retryable = [r for r in recruiters if _is_sendable(r)]
+        if not retryable:
+            break  # all delivered or all patterns exhausted
+
+        print(f"  {len(retryable)} recruiter(s) bounced with untried patterns — retrying automatically...\n")
 
     print(f"\n{'═' * 64}\n  Done.\n{'═' * 64}\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Send outreach emails via Gmail and monitor for bounces.",
+        description="Send outreach emails via Gmail, poll for bounces, and retry automatically.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/send_emails.py data/jobs/stripe__data_scientist__*.json\n"
+            "  python scripts/send_emails.py data/jobs/stripe__*.json \\\n"
+            "      --resume ~/Downloads/resume.pdf --from-name 'Your Name'\n"
             "  python scripts/send_emails.py data/jobs/stripe__*.json --dry-run\n"
             "  python scripts/send_emails.py data/jobs/stripe__*.json --max-send 1 --wait-seconds 60\n"
-            "  python scripts/send_emails.py data/jobs/stripe__*.json --check-bounces\n"
-            "  python scripts/send_emails.py data/jobs/stripe__*.json --retry-bounced\n"
+            "  python scripts/send_emails.py data/jobs/stripe__*.json --no-wait\n"
         ),
     )
     parser.add_argument("job_path", type=Path, help="Path to the job JSON file")
     parser.add_argument(
         "--max-send", type=int, default=None,
-        help="Max recruiter emails to send per run (default: from settings, usually 3)"
+        help=(
+            "Max emails to send per batch round (default: 3). "
+            "Bounced recruiters are automatically retried with the next "
+            "email pattern in subsequent rounds."
+        ),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -290,15 +285,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--no-wait", action="store_true",
-        help="Send emails then exit immediately (skip bounce polling)"
-    )
-    parser.add_argument(
-        "--check-bounces", action="store_true",
-        help="Poll Gmail for bounces only — no sending"
-    )
-    parser.add_argument(
-        "--retry-bounced", action="store_true",
-        help="Check bounces first, then send to next pattern for bounced recruiters"
+        help="Send emails then exit immediately — skip bounce polling and auto-retry"
     )
     parser.add_argument(
         "--from-name", type=str, default=None,
@@ -306,11 +293,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--wait-seconds", type=int, default=None,
-        help="Seconds to wait before bounce poll (default: GMAIL_BOUNCE_WAIT_SECONDS in .env)"
+        help="Seconds between each bounce poll (default: GMAIL_BOUNCE_POLL_INTERVAL_SECONDS in .env, 60)"
     )
     parser.add_argument(
         "--resume", type=Path, default=None,
-        help="Path to resume PDF to attach + triggers body re-draft with job URL"
+        help="Path to resume PDF — attached to emails and triggers a fresh body re-draft with job URL"
     )
 
     args = parser.parse_args()
@@ -321,9 +308,7 @@ if __name__ == "__main__":
         max_send=args.max_send or settings.gmail_max_send_per_run,
         dry_run=args.dry_run,
         no_wait=args.no_wait,
-        check_bounces_only=args.check_bounces,
-        retry_bounced=args.retry_bounced,
         from_name=args.from_name or settings.gmail_sender_name,
-        wait_seconds=args.wait_seconds or settings.gmail_bounce_wait_seconds,
+        poll_interval=args.wait_seconds or settings.gmail_bounce_poll_interval_seconds,
         resume_path=args.resume,
     ))
