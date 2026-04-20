@@ -34,22 +34,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _JOB_FAMILY_TERMS: dict[JobFamily, list[str]] = {
-    JobFamily.SOFTWARE_ENGINEERING:   ["technical recruiter", "engineering recruiter"],
-    JobFamily.DATA_SCIENCE_ML:        ["technical recruiter", "machine learning recruiter"],
-    JobFamily.DATA_ANALYTICS:         ["technical recruiter", "data recruiter"],
-    JobFamily.BUSINESS_ANALYTICS:     ["talent acquisition", "recruiter"],
-    JobFamily.BUSINESS_DEVELOPMENT:   ["sales recruiter", "talent acquisition"],
-    JobFamily.PRODUCT_MANAGEMENT:     ["technical recruiter", "product recruiter"],
-    JobFamily.DESIGN_UX:              ["design recruiter", "creative recruiter"],
-    JobFamily.DEVOPS_INFRA:           ["technical recruiter", "infrastructure recruiter"],
-    JobFamily.CYBERSECURITY:          ["security recruiter", "technical recruiter"],
-    JobFamily.MARKETING:              ["marketing recruiter", "talent acquisition"],
-    JobFamily.FINANCE:                ["finance recruiter", "talent acquisition"],
-    JobFamily.LEGAL:                  ["legal recruiter", "talent acquisition"],
-    JobFamily.RESEARCH:               ["research recruiter", "technical recruiter"],
-    JobFamily.OPERATIONS:             ["operations recruiter", "talent acquisition"],
-    JobFamily.POLICY:                 ["recruiter", "talent acquisition"],
-    JobFamily.OTHER:                  ["recruiter", "talent acquisition"],
+    JobFamily.SOFTWARE_ENGINEERING:   ["technical recruiter", "engineering recruiter", "software recruiter", "talent acquisition", "sourcer", "recruiter"],
+    JobFamily.DATA_SCIENCE_ML:        ["technical recruiter", "machine learning recruiter", "data science recruiter", "talent acquisition", "sourcer", "recruiter"],
+    JobFamily.DATA_ANALYTICS:         ["technical recruiter", "data recruiter", "analytics recruiter", "talent acquisition", "sourcer", "recruiter"],
+    JobFamily.BUSINESS_ANALYTICS:     ["talent acquisition", "recruiter", "business recruiter", "technical recruiter", "sourcer", "staffing"],
+    JobFamily.BUSINESS_DEVELOPMENT:   ["sales recruiter", "talent acquisition", "business development recruiter", "recruiter", "sourcer", "staffing"],
+    JobFamily.PRODUCT_MANAGEMENT:     ["technical recruiter", "product recruiter", "talent acquisition", "recruiter", "sourcer", "staffing"],
+    JobFamily.DESIGN_UX:              ["design recruiter", "creative recruiter", "talent acquisition", "recruiter", "sourcer", "staffing"],
+    JobFamily.DEVOPS_INFRA:           ["technical recruiter", "infrastructure recruiter", "devops recruiter", "talent acquisition", "sourcer", "recruiter"],
+    JobFamily.CYBERSECURITY:          ["security recruiter", "technical recruiter", "talent acquisition", "recruiter", "sourcer", "staffing"],
+    JobFamily.MARKETING:              ["marketing recruiter", "talent acquisition", "recruiter", "sourcer", "staffing", "creative recruiter"],
+    JobFamily.FINANCE:                ["finance recruiter", "talent acquisition", "recruiter", "sourcer", "staffing", "accounting recruiter"],
+    JobFamily.LEGAL:                  ["legal recruiter", "talent acquisition", "recruiter", "sourcer", "staffing", "compliance recruiter"],
+    JobFamily.RESEARCH:               ["research recruiter", "technical recruiter", "talent acquisition", "recruiter", "sourcer", "staffing"],
+    JobFamily.OPERATIONS:             ["operations recruiter", "talent acquisition", "recruiter", "sourcer", "staffing", "supply chain recruiter"],
+    JobFamily.POLICY:                 ["recruiter", "talent acquisition", "sourcer", "staffing", "government recruiter", "policy recruiter"],
+    JobFamily.OTHER:                  ["recruiter", "talent acquisition", "sourcer", "staffing", "technical recruiter", "university recruiter"],
 }
 
 _DDG_SEARCH_URL   = "https://html.duckduckgo.com/html/"
@@ -117,11 +117,10 @@ async def find_recruiters(
     first failure of any backend, all remaining queries in this session
     automatically use the next available backend.
 
-    Query cascade (stops as soon as max_results unique recruiters are found):
-      1. term_1 + city  (if location available)
-      2. term_1         (no location)
-      3. term_2 + city  (if location available)
-      4. term_2         (no location)
+    Query strategy (stops as soon as max_results unique recruiters are found):
+      Phase 1 — all search terms, city-first then without, page 0
+      Phase 2 — pagination: cycle back through queries that yielded results,
+                 fetching the next page (offset 10, 20, 30...) until max_results
 
     Returns list of Recruiter objects, deduplicated by linkedin_url.
     """
@@ -132,17 +131,20 @@ async def find_recruiters(
     terms = _JOB_FAMILY_TERMS.get(job.job_family, ["recruiter", "talent acquisition"])
     city = _extract_city(job.location) if job.location else None
 
-    # Build query cascade: for each term, try with city first, then without.
-    # "talent" is kept as a last-resort fallback appended after the main terms.
-    queries: list[tuple[str, str]] = []  # (query_string, search_term_label)
-    for term in terms[:2]:
+    # Build phase-1 query list: all terms, city variant first then without city.
+    # Exclude "talent" terms — they stay as a last-resort fallback.
+    primary_terms = [t for t in terms if t != "talent"]
+    talent_terms  = [t for t in terms if t == "talent"]
+
+    phase1_queries: list[tuple[str, str]] = []
+    for term in primary_terms:
         if city:
-            queries.append((f'site:linkedin.com/in "{company}" "{term}" "{city}"', term))
-        queries.append((f'site:linkedin.com/in "{company}" "{term}"', term))
-    # Talent fallback — only used when all primary queries return nothing
-    if city:
-        queries.append((f'site:linkedin.com/in "{company}" "talent" "{city}"', "talent"))
-    queries.append((f'site:linkedin.com/in "{company}" "talent"', "talent"))
+            phase1_queries.append((f'site:linkedin.com/in "{company}" "{term}" "{city}"', term))
+        phase1_queries.append((f'site:linkedin.com/in "{company}" "{term}"', term))
+    for term in talent_terms:
+        if city:
+            phase1_queries.append((f'site:linkedin.com/in "{company}" "{term}" "{city}"', term))
+        phase1_queries.append((f'site:linkedin.com/in "{company}" "{term}"', term))
 
     # Build the ordered list of available backends
     cfg = _load_config()
@@ -154,74 +156,123 @@ async def find_recruiters(
     if cfg.get("google_cse_api_key") and cfg.get("google_cse_cx"):
         backends.append("google_cse")
 
-    backend_idx = 0  # index into backends; advances on failure
-
+    backend_idx = 0  # advances on failure; shared across all phases
     all_recruiters: list[Recruiter] = []
     seen_urls: set[str] = set()
+    query_num = 0  # global counter for display
 
-    # Split queries into primary and talent-fallback groups
-    primary_queries = [(q, t) for q, t in queries if t != "talent"]
-    talent_queries  = [(q, t) for q, t in queries if t == "talent"]
-
-    # Run primary queries first; only run talent queries if still empty after all primary
-    active_queries = primary_queries + talent_queries
-
-    for i, (query, term_label) in enumerate(active_queries):
-        if len(all_recruiters) >= max_results:
-            break
-
-        # Skip talent fallback queries unless we have zero results so far
-        if term_label == "talent" and all_recruiters:
-            continue
-
-        if backend_idx >= len(backends):
-            print("  ✗ All search backends exhausted — stopping.")
-            break
-
-        # Delay between queries
-        if i > 0:
-            delay = random.uniform(*delay_range)
-            print(f"  Waiting {delay:.1f}s before next query...")
-            await asyncio.sleep(delay)
-
-        print(f"  Query {i + 1}: {query}")
-
-        # Try backends in order, advancing on failure
-        batch: list[Recruiter] = []
-        while backend_idx < len(backends):
-            backend = backends[backend_idx]
-            try:
-                batch = await _dispatch(backend, query, cfg)
-                print(f"  → [{backend.upper()}] Found {len(batch)} result(s)")
-                break
-            except RecruiterSearchError as e:
-                print(f"  ⚠ {backend.upper()} failed: {e}")
-                backend_idx += 1
-                if backend_idx < len(backends):
-                    print(f"  ↻ Switching to {backends[backend_idx].upper()}...")
-
+    def _add_batch(batch: list[Recruiter], term_label: str) -> int:
         new_count = 0
         for r in batch:
             norm_url = _normalize_linkedin_url(r.linkedin_url or "")
             if norm_url and norm_url not in seen_urls:
                 seen_urls.add(norm_url)
-                # Tag the recruiter with both backend and search term for traceability
                 r.source = f"{r.source} [{term_label}]"
                 all_recruiters.append(r)
                 new_count += 1
+        return new_count
 
+    async def _run_query(query: str, offset: int = 0) -> list[Recruiter]:
+        """Run a single query against the current backend, failing over on error."""
+        nonlocal backend_idx
+        batch: list[Recruiter] = []
+        while backend_idx < len(backends):
+            backend = backends[backend_idx]
+            try:
+                batch = await _dispatch(backend, query, cfg, offset=offset)
+                print(f"  → [{backend.upper()}] Found {len(batch)} result(s)")
+                return batch
+            except RecruiterSearchError as e:
+                print(f"  ⚠ {backend.upper()} failed: {e}")
+                backend_idx += 1
+                if backend_idx < len(backends):
+                    print(f"  ↻ Switching to {backends[backend_idx].upper()}...")
+        print("  ✗ All search backends exhausted — stopping.")
+        return []
+
+    # ── Phase 1: all query variants, page 0 ──────────────────────────────────
+    # Track which queries returned results so we can paginate them in phase 2.
+    fruitful_queries: list[tuple[str, str]] = []  # (query, term_label)
+
+    for query, term_label in phase1_queries:
+        if len(all_recruiters) >= max_results:
+            break
+        if backend_idx >= len(backends):
+            break
+
+        # Skip talent fallback queries unless we have very few results
+        if "talent" in term_label and len(all_recruiters) >= 5:
+            continue
+
+        query_num += 1
+        if query_num > 1:
+            delay = random.uniform(*delay_range)
+            print(f"  Waiting {delay:.1f}s before next query...")
+            await asyncio.sleep(delay)
+
+        print(f"  Query {query_num}: {query}")
+        batch = await _run_query(query, offset=0)
+        new_count = _add_batch(batch, term_label)
         if batch:
             print(f"  → {new_count} new unique recruiter(s)")
+        if new_count > 0:
+            fruitful_queries.append((query, term_label))
+
+    # ── Phase 2: paginate through fruitful queries until max_results ──────────
+    if len(all_recruiters) < max_results and fruitful_queries and backend_idx < len(backends):
+        # Determine page size for the current backend
+        backend = backends[backend_idx]
+        page_size = _page_size(backend)
+
+        page = 1  # page 0 already fetched in phase 1
+        max_pages = 5  # cap at 5 extra pages per query to avoid hammering
+
+        while len(all_recruiters) < max_results and page <= max_pages:
+            made_progress = False
+            for query, term_label in fruitful_queries:
+                if len(all_recruiters) >= max_results:
+                    break
+                if backend_idx >= len(backends):
+                    break
+
+                offset = page * page_size
+                query_num += 1
+                delay = random.uniform(*delay_range)
+                print(f"  Waiting {delay:.1f}s before next query...")
+                await asyncio.sleep(delay)
+
+                print(f"  Query {query_num} [page {page + 1}]: {query}")
+                batch = await _run_query(query, offset=offset)
+                new_count = _add_batch(batch, term_label)
+                if batch:
+                    print(f"  → {new_count} new unique recruiter(s)")
+                if new_count > 0:
+                    made_progress = True
+
+                # If backend changed mid-loop, recalculate page size
+                current_backend = backends[backend_idx] if backend_idx < len(backends) else backend
+                if current_backend != backend:
+                    backend = current_backend
+                    page_size = _page_size(backend)
+
+            if not made_progress:
+                break  # all fruitful queries are exhausted at this page depth
+            page += 1
 
     return all_recruiters[:max_results]
 
 
-async def _dispatch(backend: str, query: str, cfg: dict) -> list[Recruiter]:
+def _page_size(backend: str) -> int:
+    """Return the result count per page for a given backend."""
+    return {"ddg": 30, "brave": 10, "tavily": 20, "google_cse": 10}.get(backend, 10)
+
+
+async def _dispatch(backend: str, query: str, cfg: dict, offset: int = 0) -> list[Recruiter]:
     """Route a query to the appropriate backend search function."""
     if backend == "ddg":
-        return await _search_ddg(query)
+        return await _search_ddg(query, offset=offset)
     if backend == "brave":
-        return await _search_brave(query, cfg["brave_key"])
+        return await _search_brave(query, cfg["brave_key"], offset=offset)
     if backend == "tavily":
         return await _search_tavily(query, cfg["tavily_key"])
     if backend == "google_cse":
@@ -229,6 +280,7 @@ async def _dispatch(backend: str, query: str, cfg: dict) -> list[Recruiter]:
             query,
             api_key=cfg["google_cse_api_key"],
             cx=cfg["google_cse_cx"],
+            start=offset + 1,  # Google CSE uses 1-based start
         )
     raise RecruiterSearchError(f"Unknown backend: {backend}")
 
@@ -238,7 +290,7 @@ async def _dispatch(backend: str, query: str, cfg: dict) -> list[Recruiter]:
 # ---------------------------------------------------------------------------
 
 
-async def _search_ddg(query: str) -> list[Recruiter]:
+async def _search_ddg(query: str, offset: int = 0) -> list[Recruiter]:
     """Fetch one DuckDuckGo HTML search page and parse recruiter candidates."""
     headers = {
         "User-Agent": random.choice(_USER_AGENTS),
@@ -255,7 +307,7 @@ async def _search_ddg(query: str) -> list[Recruiter]:
         try:
             resp = await client.post(
                 _DDG_SEARCH_URL,
-                data={"q": query, "b": ""},
+                data={"q": query, "b": str(offset) if offset else ""},
             )
         except httpx.TimeoutException as e:
             raise RecruiterSearchError(f"Request timed out: {e}") from e
@@ -309,14 +361,16 @@ def _parse_ddg_results(html: str) -> list[Recruiter]:
 # ---------------------------------------------------------------------------
 
 
-async def _search_brave(query: str, api_key: str) -> list[Recruiter]:
+async def _search_brave(query: str, api_key: str, offset: int = 0) -> list[Recruiter]:
     """Search Brave and parse LinkedIn recruiter profiles from results."""
     headers = {
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "X-Subscription-Token": api_key,
     }
-    params = {"q": query, "count": "10"}
+    params: dict = {"q": query, "count": "20"}
+    if offset:
+        params["offset"] = str(offset)
 
     async with httpx.AsyncClient(timeout=15) as client:
         try:
@@ -367,7 +421,7 @@ async def _search_tavily(query: str, api_key: str) -> list[Recruiter]:
         "query": query,
         "search_depth": "basic",
         "include_domains": ["linkedin.com"],
-        "max_results": 10,
+        "max_results": 20,  # Tavily max; no pagination support
     }
 
     async with httpx.AsyncClient(timeout=15) as client:
@@ -412,9 +466,11 @@ def _parse_tavily_results(data: dict) -> list[Recruiter]:
 # ---------------------------------------------------------------------------
 
 
-async def _search_google_cse(query: str, *, api_key: str, cx: str) -> list[Recruiter]:
+async def _search_google_cse(query: str, *, api_key: str, cx: str, start: int = 1) -> list[Recruiter]:
     """Search Google Custom Search API and parse LinkedIn recruiter profiles."""
-    params = {"key": api_key, "cx": cx, "q": query, "num": "10"}
+    params: dict = {"key": api_key, "cx": cx, "q": query, "num": "10"}
+    if start > 1:
+        params["start"] = str(start)
 
     async with httpx.AsyncClient(timeout=15) as client:
         try:
